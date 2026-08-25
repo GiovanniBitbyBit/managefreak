@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+  <title>ManageFreak</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">
+      <span class="logo">⬢</span>
+      <span class="brand-name">ManageFreak</span>
+      <span id="fw-version" class="brand-fw hidden"></span>
+      <span class="brand-sub">Arturia MicroFreak preset manager</span>
+    </div>
+    <div class="device-controls">
+      <select id="midi-input" title="MIDI input port"></select>
+      <select id="midi-output" title="MIDI output port"></select>
+      <button id="btn-connect" class="btn primary">Connect</button>
+      <button id="btn-refresh-ports" class="btn" title="Refresh port list">⟳</button>
+      <span id="connection-status" class="status-dot offline" title="Connection status"></span>
+    </div>
+  </header>
+
+  <div id="layout">
+    <aside id="sidebar">
+      <div id="sidebar-library" class="sidebar-pane">
+        <h3>Libraries</h3>
+        <div id="lib-list"></div>
+        <h3>Library actions</h3>
+        <button id="btn-import" class="btn wide">Import library or presets</button>
+        <button id="btn-upload-library" class="btn wide">➡ Send library to MicroFreak</button>
+        <button id="btn-backup" class="btn wide">Backup library (JSON)</button>
+        <h3>Categories</h3>
+        <div id="cat-list"></div>
+        <h3>Characteristics</h3>
+        <div id="char-list"></div>
+      </div>
+    </aside>
+
+    <div class="resizer" data-resize="side" title="Drag to resize"></div>
+
+    <section id="content">
+      <div id="content-toolbar">
+        <input id="search" type="search" placeholder="Search PC library by name…" />
+      </div>
+
+      <div id="library-view">
+        <div class="view-header">
+          <div class="view-header-row">
+            <h2><span id="library-title">PC Library</span> <span id="library-count" class="muted"></span></h2>
+            <button id="btn-view-toggle" class="btn small" title="Toggle grid / list">☰</button>
+          </div>
+          <div class="sort-row">
+            <label for="sort-select">Sort:</label>
+            <select id="sort-select">
+              <option value="default">Manual order</option>
+              <option value="name">Name</option>
+              <option value="rating">Rating</option>
+              <option value="category">Category</option>
+            </select>
+          </div>
+        </div>
+        <div id="lib-grid" class="lib-grid"></div>
+      </div>
+    </section>
+
+    <div class="resizer" data-resize="right" title="Drag to resize"></div>
+
+    <aside id="right">
+      <div id="device-panel">
+        <div id="device-header">
+          <div class="device-title-row">
+            <h3>MicroFreak</h3>
+            <span id="device-counts" class="device-counts"></span>
+          </div>
+          <input id="device-search" type="search" placeholder="Search preset name…" />
+          <div class="device-actions">
+            <button id="btn-read-all" class="btn small wide">⬅ Fetch library to PC</button>
+            <button id="btn-download-bank" class="btn small wide">⭳ Export .mfprojz to PC</button>
+            <button id="btn-cancel" class="btn small wide danger hidden">✕ Cancel</button>
+          </div>
+          <div id="device-selbar" class="sel-bar compact">
+            <span id="device-sel-count" class="sel-count">0 selected</span>
+            <button class="btn small" data-dsel="read">⬅ Import to library</button>
+            <button class="btn small danger" data-dsel="delete" title="Initialize (Init) the selected slots">Delete</button>
+            <button class="btn small" data-dsel="clear" title="Deselect">Deselect</button>
+          </div>
+        </div>
+        <div id="slot-list" class="slot-list"></div>
+      </div>
+    </aside>
+
+    <div class="resizer resizer-h" data-resize="h" title="Drag to resize the detail pane height"></div>
+
+    <div id="detail-pane">
+      <div id="detail-empty" class="detail-empty">Select a preset for details</div>
+      <div id="detail" class="hidden">
+        <h2 id="detail-name"></h2>
+        <div id="detail-meta" class="detail-meta"></div>
+        <div id="detail-tags" class="detail-tags"></div>
+        <input id="detail-add-tag" type="text" placeholder="Add tag…" class="hidden" />
+        <div id="detail-notes-box" class="hidden">
+          <textarea id="detail-notes" placeholder="Personal notes…" rows="3"></textarea>
+        </div>
+        <div id="detail-actions" class="detail-actions"></div>
+        <h3>Parameters</h3>
+        <div id="detail-params" class="detail-params"></div>
+      </div>
+    </div>
+  </div>
+
+  <footer id="statusbar">
+    <button id="btn-theme" class="btn small" title="Toggle theme">🌙</button>
+    <span id="status-text">Ready. Connect the MicroFreak and set up the MIDI ports.</span>
+    <div id="progress-wrap" class="hidden">
+      <div id="progress-bar"><div id="progress-fill"></div></div>
+      <span id="progress-text"></span>
+    </div>
+  </footer>
+
+  <div id="modal-backdrop" class="hidden">
+    <div id="modal" class="modal">
+      <h3 id="modal-title"></h3>
+      <div id="modal-body"></div>
+      <div id="modal-actions">
+        <button id="modal-cancel" class="btn">Cancel</button>
+        <button id="modal-ok" class="btn primary">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="hidden"></div>
+
+  <script src="js/midi.js"></script>
+  <script src="js/protocol.js"></script>
+  <script src="js/mfp.js"></script>
+  <script src="js/params.js"></script>
+  <script src="js/shift.js"></script>
+  <script src="js/library.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

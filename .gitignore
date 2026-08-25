@@ -1,0 +1,29 @@
+# ---- Node / build ----
+app/node_modules/
+app/dist/
+dist/
+
+# ---- OS junk ----
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---- Logs / debug ----
+*.log
+npm-debug.log*
+
+# ---- Editors ----
+.vscode/
+.idea/
+
+# ---- App user data & personal files ----
+library.json
+*.bak
+
+# ---- Third-party reference sources (not part of the app) ----
+# Cloned repositories used only as protocol references during development.
+# They keep their own licenses and are credited in the README.
+research/
+
+# ---- Proprietary Arturia software (never distribute) ----
+MicroFreak Editor uni/

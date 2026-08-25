@@ -1,0 +1,716 @@
+// ManageFreak — test runner (senza dipendenze)
+'use strict';
+
+const assert = require('assert');
+const path = require('path');
+
+// ---------------------------------------------------------------------------
+// Stub Midi con risposte scriptate
+// ---------------------------------------------------------------------------
+
+function makeMidiStub() {
+  const calls = [];
+  let script = [];
+  return {
+    calls,
+    queue(...msgs) { script = msgs; },
+    get remaining() { return script.length; },
+    Midi: {
+      requestSysex: async (op, payload) => {
+        calls.push({ op, payload: payload ? Array.from(payload) : null });
+        const next = script.shift();
+        if (next instanceof Error) throw next;
+        if (next === undefined) throw new Error('script esaurito');
+        return Uint8Array.from(next);
+      },
+      sendCC: () => {},
+      sendPC: () => {},
+    },
+  };
+}
+
+global.Midi = makeMidiStub().Midi;
+const MF = require('../renderer/js/protocol.js');
+const Mfp = require('../renderer/js/mfp.js');
+const Params = require('../renderer/js/params.js');
+
+// stub window.mfapi per la libreria
+global.window = {
+  mfapi: {
+    fileExists: async () => false,
+    readFile: async () => '',
+    writeFile: async () => true,
+    listDir: async () => [],
+  },
+};
+const Library = require('../renderer/js/library.js');
+const Shift = require('../renderer/js/shift.js');
+
+// ---------------------------------------------------------------------------
+// helper per costruire messaggi sysex
+// ---------------------------------------------------------------------------
+
+const sysex = (seq, op, payload) => {
+  const p = payload ? Array.from(payload) : [];
+  return [0xf0, 0x00, 0x20, 0x6b, 0x07, 0x01, seq, p.length, op, ...p, 0xf7];
+};
+
+const headerPayload = ({ bank = 0, program = 0, name = 'Test', category = 3, p1 = 7, empty = false } = {}) => {
+  const h = new Uint8Array(35);
+  h[0] = bank;
+  h[1] = program;
+  h[3] = empty ? 0x08 : 0;
+  h[8] = program;
+  h[10] = category;
+  h[11] = p1;
+  for (let i = 0; i < name.length && i < 14; i++) h[12 + i] = name.charCodeAt(i);
+  return h;
+};
+
+const part = (seed) => {
+  const p = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) p[i] = (seed + i) & 0xff;
+  return p;
+};
+
+let pass = 0;
+let fail = 0;
+
+async function test(name, fn) {
+  try {
+    await fn();
+    pass++;
+    console.log(`  ✓ ${name}`);
+  } catch (e) {
+    fail++;
+    console.error(`  ✗ ${name}`);
+    console.error('    ' + (e && e.stack ? e.stack.split('\n').slice(0, 4).join('\n    ') : e));
+  }
+}
+
+(async () => {
+  console.log('Test ManageFreak\n');
+
+  // ================================================================== MFP
+  console.log('Formato .mfp:');
+
+  await test('round-trip .mfp con byte >127 e nome', () => {
+    const data = new Uint8Array(4672);
+    for (let i = 0; i < data.length; i++) data[i] = (i * 7 + 13) & 0xff;
+    const out = Mfp.serializeMfp({ name: 'My Preset', category: 5, init: 0, p1: 127, data });
+    const parsed = Mfp.parseMfp(out);
+    assert.strictEqual(parsed.version, '174');
+    assert.strictEqual(parsed.name, 'My Preset');
+    assert.strictEqual(parsed.category, 5);
+    assert.strictEqual(parsed.init, 0);
+    assert.strictEqual(parsed.p1, 127);
+    assert.strictEqual(parsed.data.length, 4672);
+    assert.deepStrictEqual(parsed.characteristics, []);
+    for (let i = 0; i < data.length; i++) assert.strictEqual(parsed.data[i], data[i]);
+  });
+
+  await test('characteristics: round-trip del campo a 18 bit', () => {
+    const data = new Uint8Array(4672);
+    const chars = ['Acid', 'Bright', 'Soundtrack', 'Quiet'];
+    const out = Mfp.serializeMfp({ name: 'X', category: 0, init: 0, p1: 0, data, characteristics: chars });
+    const parsed = Mfp.parseMfp(out);
+    assert.deepStrictEqual([...parsed.characteristics].sort(), [...chars].sort());
+    // Acid è il bit più a destra, Soundtrack il più a sinistra
+    const text = new TextDecoder().decode(out);
+    const bitset = text.split(' ').find((t) => /^[01]{18}$/.test(t));
+    assert.ok(bitset, 'bitset presente');
+    assert.strictEqual(bitset[17], '1'); // Acid
+    assert.strictEqual(bitset[0], '1'); // Soundtrack
+    assert.strictEqual(bitset[16], '0'); // Aggressive no
+  });
+
+  await test('parse .mfp di riferimento (come scritto da MCC/Elektroid)', () => {
+    const data = new Uint8Array(4672);
+    data[0] = 0xff; // → -1 nel file
+    data[1] = 0x80; // → -128
+    data[2] = 0x7f; // → 127
+    let text = '22 serialization::archive 10 0 4 3 174 4 Test 2 0 0 18 000000000000000000 0 0 99 4672';
+    for (let i = 0; i < data.length; i++) {
+      text += ' ' + (data[i] > 127 ? data[i] - 256 : data[i]);
+    }
+    text += '\n';
+    const parsed = Mfp.parseMfp(new TextEncoder().encode(text));
+    assert.strictEqual(parsed.name, 'Test');
+    assert.strictEqual(parsed.category, 2);
+    assert.strictEqual(parsed.p1, 99);
+    assert.strictEqual(parsed.data[0], 0xff);
+    assert.strictEqual(parsed.data[1], 0x80);
+    assert.strictEqual(parsed.data[2], 0x7f);
+  });
+
+  await test('parse .mfp con nome vuoto e init=1', () => {
+    const data = new Uint8Array(4672);
+    const text = `22 serialization::archive 10 0 4 3 174 0  0 0 0 18 000000000000000000 1 0 5 4672${' 0'.repeat(4672)}\n`;
+    const parsed = Mfp.parseMfp(new TextEncoder().encode(text));
+    assert.strictEqual(parsed.name, '');
+    assert.strictEqual(parsed.init, 1);
+    assert.strictEqual(parsed.p1, 5);
+  });
+
+  await test('parse .mfp Init vuoto (datalen=0) → init=1 e corpo vuoto', () => {
+    const text = `22 serialization::archive 10 0 4 3 174 4 Init 0 0 0 18 000000000000000000 1 0 0 0\n`;
+    const parsed = Mfp.parseMfp(new TextEncoder().encode(text));
+    assert.strictEqual(parsed.name, 'Init');
+    assert.strictEqual(parsed.init, 1);
+    assert.strictEqual(parsed.data.length, 0);
+  });
+
+  console.log('ZIP (.mfpz/.mfprojz):');
+
+  await test('round-trip zip (stored)', async () => {
+    const zip = await Mfp.writeZip([
+      { name: '0_preset', data: new TextEncoder().encode('ciao') },
+      { name: 'project/bank/001-file.mbp', data: new TextEncoder().encode('secondo') },
+    ]);
+    const entries = await Mfp.readZip(zip);
+    assert.strictEqual(entries.length, 2);
+    assert.strictEqual(entries[0].name, '0_preset');
+    assert.strictEqual(new TextDecoder().decode(entries[0].data), 'ciao');
+    assert.strictEqual(entries[1].name, 'project/bank/001-file.mbp');
+    assert.strictEqual(new TextDecoder().decode(entries[1].data), 'secondo');
+  });
+
+  await test('lettura zip deflate (generato con zlib)', async () => {
+    const zlib = require('zlib');
+    // costruisci zip minimale deflate a mano
+    const nameB = Buffer.from('x.mfp');
+    const raw = Buffer.from('contenuto deflato');
+    const compressed = zlib.deflateRawSync(raw);
+    const crc = Mfp.crc32(new Uint8Array(raw));
+    const chunks = [];
+    const u16 = (v) => Buffer.from([v & 0xff, (v >> 8) & 0xff]);
+    const u32 = (v) => Buffer.from([v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >>> 24) & 0xff]);
+    const localOff = 0;
+    chunks.push(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    chunks.push(u16(20), u16(0), u16(8), u16(0), u16(0x21));
+    chunks.push(u32(crc), u32(compressed.length), u32(raw.length));
+    chunks.push(u16(nameB.length), u16(0));
+    chunks.push(nameB, compressed);
+    const cdStart = chunks.reduce((a, c) => a + c.length, 0);
+    chunks.push(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    chunks.push(u16(20), u16(20), u16(0), u16(8), u16(0), u16(0x21));
+    chunks.push(u32(crc), u32(compressed.length), u32(raw.length));
+    chunks.push(u16(nameB.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(localOff));
+    chunks.push(nameB);
+    const cdSize = chunks.reduce((a, c) => a + c.length, 0) - cdStart;
+    chunks.push(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+    chunks.push(u16(0), u16(0), u16(1), u16(1), u32(cdSize), u32(cdStart), u16(0));
+    const zip = Buffer.concat(chunks);
+    const entries = await Mfp.readZip(new Uint8Array(zip));
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(new TextDecoder().decode(entries[0].data), 'contenuto deflato');
+  });
+
+  await test('round-trip .mfpz', async () => {
+    const data = new Uint8Array(4672);
+    data.fill(42);
+    const z = await Mfp.serializeMfpz({ name: 'ZipPreset', category: 8, init: 0, p1: 0, data });
+    const parsed = await Mfp.parseMfpz(z);
+    assert.strictEqual(parsed.name, 'ZipPreset');
+    assert.strictEqual(parsed.data[1000], 42);
+  });
+
+  await test('.mfprojz con più preset ordinati', async () => {
+    const mk = (name, cat) => {
+      const data = new Uint8Array(4672);
+      return Mfp.serializeMfp({ name, category: cat, init: 0, p1: 0, data });
+    };
+    const zip = await Mfp.writeZip([
+      { name: 'project/bank/002-two.mbp', data: mk('Two', 2) },
+      { name: 'project/bank/001-one.mbp', data: mk('One', 1) },
+    ]);
+    const presets = await Mfp.parseMfprojz(zip);
+    assert.strictEqual(presets.length, 2);
+    assert.strictEqual(presets[0].fileName, '001-one.mbp');
+    assert.strictEqual(presets[0].name, 'One');
+    assert.strictEqual(presets[1].name, 'Two');
+  });
+
+  await test('serializeMfprojz → parseMfprojz round-trip (bank completa)', async () => {
+    const presets = [];
+    for (let slot = 1; slot <= 4; slot++) {
+      const data = new Uint8Array(4672);
+      data.fill(slot);
+      presets.push({ slot, name: `Preset${slot}`, category: slot % 11, p1: slot, data });
+    }
+    const bytes = await Mfp.serializeMfprojz(presets);
+    const parsed = await Mfp.parseMfprojz(bytes);
+    assert.strictEqual(parsed.length, 4);
+    assert.strictEqual(parsed[0].fileName, '001-Preset1.mbp');
+    assert.strictEqual(parsed[0].name, 'Preset1');
+    assert.strictEqual(parsed[3].name, 'Preset4');
+    for (const p of parsed) {
+      const idx = parseInt(p.name.replace('Preset', ''), 10) - 1;
+      assert.strictEqual(p.data[100], idx + 1);
+    }
+  });
+
+  await test('.syx da header + 146 parti', () => {
+    const messages = [];
+    messages.push(Uint8Array.from(sysex(0x10, 0x52, headerPayload({ bank: 1, program: 5, name: 'SyxTest', category: 4, p1: 9 }))));
+    for (let i = 0; i < 146; i++) {
+      messages.push(Uint8Array.from(sysex(0x11 + (i & 0x0f), i === 145 ? 0x17 : 0x16, part(i))));
+    }
+    const total = messages.reduce((a, m) => a + m.length, 0);
+    const blob = new Uint8Array(total);
+    let off = 0;
+    for (const m of messages) {
+      blob.set(m, off);
+      off += m.length;
+    }
+    const preset = Mfp.parseSyx(blob);
+    assert.strictEqual(preset.name, 'SyxTest');
+    assert.strictEqual(preset.category, 4);
+    assert.strictEqual(preset.p1, 9);
+    assert.strictEqual(preset.data.length, 4672);
+    assert.strictEqual(preset.data[0], 0); // part(0)[0] = (0+0)&0xff
+    assert.strictEqual(preset.data[32], 1); // part(1)[0] = (1+0)&0xff
+    assert.strictEqual(preset.data[4671], (145 + 31) & 0xff);
+  });
+
+  // ================================================================== PROTOCOLLO
+  console.log('Protocollo:');
+
+  await test('readHeader decodifica la risposta 0x52', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    stub.queue(sysex(0x00, 0x52, headerPayload({ name: 'BassoGrosso', category: 0, p1: 3 })));
+    const h = await MF.readHeader(1);
+    assert.strictEqual(h.name, 'BassoGrosso');
+    assert.strictEqual(h.category, 0);
+    assert.strictEqual(h.p1, 3);
+    assert.strictEqual(h.empty, false);
+    assert.strictEqual(h.slot, 1);
+    assert.deepStrictEqual(stub.calls[0], { op: 0x19, payload: [0, 0, 0] });
+  });
+
+  await test('readHeader slot 300 → bank 2, program 43', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    stub.queue(sysex(0x01, 0x52, headerPayload({ bank: 2, program: 43, name: 'X' })));
+    await MF.readHeader(300);
+    assert.deepStrictEqual(stub.calls[0], { op: 0x19, payload: [2, 43, 0] });
+  });
+
+  await test('readPreset assembla 146 parti', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    stub.queue(
+      sysex(0x00, 0x52, headerPayload({ name: 'Full' })),
+      sysex(0x01, 0x15, null),
+      ...Array.from({ length: 146 }, (_, i) => sysex(0x02 + (i & 0x7f), i === 145 ? 0x17 : 0x16, part(i))),
+    );
+    const preset = await MF.readPreset(1);
+    assert.strictEqual(preset.name, 'Full');
+    assert.strictEqual(preset.data.length, 4672);
+    assert.strictEqual(preset.data[0], 0);
+    assert.strictEqual(preset.data[4671], (145 + 31) & 0xff);
+    assert.strictEqual(stub.calls[0].op, 0x19);
+    assert.deepStrictEqual(stub.calls[0].payload, [0, 0, 0]);
+    assert.strictEqual(stub.calls[1].op, 0x19);
+    assert.deepStrictEqual(stub.calls[1].payload, [0, 0, 1]);
+    for (let i = 0; i < 146; i++) {
+      assert.strictEqual(stub.calls[2 + i].op, 0x18);
+      assert.deepStrictEqual(stub.calls[2 + i].payload, [0]);
+    }
+  });
+
+  await test('readPreset su slot vuoto (init) non legge il corpo', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    stub.queue(sysex(0x00, 0x52, headerPayload({ empty: true })));
+    const preset = await MF.readPreset(9);
+    assert.strictEqual(preset.empty, true);
+    assert.strictEqual(preset.data, null);
+    assert.strictEqual(stub.calls.length, 1);
+  });
+
+  await test('readInitTemplate legge il template firmware (bank 4, program 0) con corpo', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const initHeader = headerPayload({ bank: 4, program: 0, name: 'Init', empty: true });
+    stub.queue(
+      sysex(0x00, 0x52, initHeader),
+      sysex(0x01, 0x15, null),
+      ...Array.from({ length: 146 }, (_, i) => sysex(0x02 + (i & 0x7f), i === 145 ? 0x17 : 0x16, part(i))),
+    );
+    const t = await MF.readInitTemplate();
+    assert.strictEqual(t.name, 'Init');
+    assert.strictEqual(t.data.length, 4672);
+    assert.strictEqual(t.data[0], 0);
+    assert.strictEqual(t.data[4671], (145 + 31) & 0xff);
+    assert.deepStrictEqual(stub.calls[0].payload, [4, 0, 0]);
+    assert.deepStrictEqual(stub.calls[1].payload, [4, 0, 1]);
+  });
+
+  await test('writePreset invia la sequenza corretta (header→start→flow→146 parti)', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const replies = [];
+    for (let i = 0; i < 3 + 146; i++) replies.push(sysex(0x00, 0x18, null));
+    stub.queue(...replies);
+
+    const data = new Uint8Array(4672);
+    for (let i = 0; i < data.length; i++) data[i] = i & 0xff;
+    await MF.writePreset(200, { name: 'W', category: 6, p1: 0, data });
+
+    assert.strictEqual(stub.calls.length, 3 + 146);
+    // 1. header (35 byte) via op 0x52
+    assert.strictEqual(stub.calls[0].op, 0x52);
+    assert.strictEqual(stub.calls[0].payload.length, 35);
+    assert.strictEqual(stub.calls[0].payload[0], 1); // bank di 200
+    assert.strictEqual(stub.calls[0].payload[1], 71); // program di 200
+    assert.strictEqual(stub.calls[0].payload[8], 71);
+    assert.strictEqual(stub.calls[0].payload[10], 6); // categoria
+    assert.strictEqual(stub.calls[0].payload[12], 'W'.charCodeAt(0));
+    // 2. start
+    assert.deepStrictEqual(stub.calls[1].payload, [1, 71, 1]);
+    // 3. flow
+    assert.strictEqual(stub.calls[2].op, 0x15);
+    // 4. parti
+    for (let i = 0; i < 146; i++) {
+      assert.strictEqual(stub.calls[3 + i].op, i === 145 ? 0x17 : 0x16);
+      assert.strictEqual(stub.calls[3 + i].payload.length, 32);
+      assert.strictEqual(stub.calls[3 + i].payload[0], (i * 32) & 0xff);
+    }
+  });
+
+  await test('writePreset costruisce l\'header da zero (byte opachi non riciclati)', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const replies = [];
+    for (let i = 0; i < 3 + 146; i++) replies.push(sysex(0x00, 0x18, null));
+    stub.queue(...replies);
+
+    const raw = headerPayload({ name: 'Original' });
+    raw[2] = 0x55; // byte opaco: NON deve essere riciclato nell'header scritto
+    const data = new Uint8Array(4672);
+    await MF.writePreset(5, { name: 'NuovoNome', category: 9, p1: 1, rawHeader: raw, data });
+    assert.strictEqual(stub.calls[0].payload[2], 0); // azzerato (come Elektroid)
+    assert.strictEqual(stub.calls[0].payload[12], 'N'.charCodeAt(0));
+    assert.strictEqual(stub.calls[0].payload[10], 9);
+    assert.strictEqual(stub.calls[0].payload[0], 0);
+    assert.strictEqual(stub.calls[0].payload[1], 4);
+  });
+
+  await test('scanHeaders legge 512 header e propaga gli errori di riga', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const replies = [];
+    for (let i = 0; i < 512; i++) {
+      if (i === 5) replies.push(new Error('timeout'));
+      else replies.push(sysex(i & 0x7f, 0x52, headerPayload({ name: 'P' + i, program: i & 0x7f })));
+    }
+    stub.queue(...replies);
+    const out = await MF.scanHeaders();
+    assert.strictEqual(out.length, 512);
+    assert.strictEqual(out[5].error, 'timeout');
+    assert.strictEqual(out[6].name, 'P6');
+  });
+
+  await test('scanHeaders si ferma se onProgress lancia (annullamento)', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    stub.queue(...Array.from({ length: 512 }, (_, i) => sysex(i & 0x7f, 0x52, headerPayload({ name: 'P' }))));
+    let calls = 0;
+    await assert.rejects(
+      MF.scanHeaders({
+        onProgress: () => {
+          calls++;
+          if (calls > 3) throw new Error('stop');
+        },
+      }),
+      /stop/
+    );
+    assert.ok(stub.calls.length <= 4);
+  });
+
+  await test('renamePreset riscrive solo header e poi seleziona', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const original = headerPayload({ name: 'Vecchio', category: 1, p1: 2 });
+    stub.queue(
+      sysex(0x00, 0x52, original),
+      sysex(0x01, 0x18, null),
+      sysex(0x02, 0x18, null),
+      sysex(0x03, 0x52, headerPayload({ name: 'Nuovo', category: 3, p1: 2 })),
+    );
+    const updated = await MF.renamePreset(1, { name: 'Nuovo', category: 3 });
+    assert.strictEqual(updated.name, 'Nuovo');
+    assert.strictEqual(stub.calls.length, 4);
+    assert.strictEqual(stub.calls[0].op, 0x19); // lettura header corrente
+    assert.strictEqual(stub.calls[1].op, 0x52);
+    assert.strictEqual(stub.calls[1].payload.length, 35);
+    assert.strictEqual(stub.calls[1].payload[12], 'N'.charCodeAt(0));
+    assert.strictEqual(stub.calls[1].payload[10], 3);
+    assert.deepStrictEqual(stub.calls[2].payload, [0, 0, 1]);
+    assert.strictEqual(stub.calls[3].op, 0x19); // rilettura di conferma
+  });
+
+  await test('parseReply rejects non-Arturia and malformed replies', () => {
+    assert.throws(() => MF.parseReply(Uint8Array.from([0xf0, 0x7e, 0x00, 0x06, 0x02, 0x00, 0x00, 0x00, 0x00, 0xf7])), /Arturia/);
+    assert.throws(() => MF.parseReply(Uint8Array.from([0xf0, 0x00, 0x20, 0x6b, 0xf7])), /Malformed/i);
+  });
+
+  // ================================================================== PARAMS
+  console.log('Parametri:');
+
+  const pack8to7 = (unpacked) => {
+    const out = new Uint8Array(Math.ceil(unpacked.length / 7) * 8);
+    for (let b = 0; b * 7 < unpacked.length; b++) {
+      const base = b * 8;
+      let bitmap = 0;
+      for (let i = 0; i < 7; i++) {
+        const v = unpacked[b * 7 + i] || 0;
+        if (v & 0x80) bitmap |= 1 << i;
+        out[base + 1 + i] = v & 0x7f;
+      }
+      out[base] = bitmap;
+    }
+    return out;
+  };
+
+  await test('unpack 8→7 round trip', () => {
+    const unpacked = new Uint8Array(4088);
+    for (let i = 0; i < unpacked.length; i++) unpacked[i] = (i * 31 + 7) & 0xff;
+    const packed = pack8to7(unpacked);
+    assert.strictEqual(packed.length, 4672);
+    const back = Params.unpack8to7(packed);
+    for (let i = 0; i < unpacked.length; i++) assert.strictEqual(back[i], unpacked[i]);
+  });
+
+  await test('parseStructured estrae gruppi e campi', () => {
+    const unpacked = new Uint8Array(4088);
+    let pos = 0;
+    unpacked[pos] = 0x23; // gruppo iniziale
+    unpacked[pos + 1] = 'V'.charCodeAt(0);
+    unpacked[pos + 2] = 'C'.charCodeAt(0);
+    unpacked[pos + 3] = 'O'.charCodeAt(0);
+    pos += 4;
+    // campo VCO.Type: nome "Type" → 0x40+4
+    unpacked[pos] = 0x44;
+    unpacked[pos + 1] = 'T'.charCodeAt(0);
+    unpacked[pos + 2] = 'y'.charCodeAt(0);
+    unpacked[pos + 3] = 'p'.charCodeAt(0);
+    unpacked[pos + 4] = 'e'.charCodeAt(0);
+    unpacked[pos + 5] = 0x63; // 'c'
+    unpacked[pos + 6] = 22; // metadata = 22 motori
+    unpacked[pos + 7] = 0x4a; // value low = round(14*32767/22) ≈ 20852 = 0x5174 → lo=0x74 hi=0x51
+    unpacked[pos + 8] = 0x51;
+    pos += 9;
+    // gruppo successivo VCF
+    unpacked[pos] = 0x40; // '@'
+    unpacked[pos + 1] = 0x23; // '#'
+    unpacked[pos + 2] = 'V'.charCodeAt(0);
+    unpacked[pos + 3] = 'C'.charCodeAt(0);
+    unpacked[pos + 4] = 'F'.charCodeAt(0);
+    pos += 5;
+    // campo Cutoff: nome 6 → 0x46
+    unpacked[pos] = 0x46;
+    for (let i = 0; i < 6; i++) unpacked[pos + 1 + i] = 'Cutoff'.charCodeAt(i);
+    unpacked[pos + 7] = 0x63;
+    unpacked[pos + 8] = 0; // metadata
+    const cutoff = 13186; // 0x3382
+    unpacked[pos + 9] = cutoff & 0xff;
+    unpacked[pos + 10] = (cutoff >> 8) & 0xff;
+    pos += 11;
+
+    const packed = pack8to7(unpacked);
+    const { fields } = Params.parseStructured(packed);
+    const type = fields.find((f) => f.key === 'VCO.Type');
+    assert.ok(type, 'VCO.Type presente');
+    const idx = Math.round((type.raw * 22) / 32767);
+    assert.strictEqual(idx, 14); // Vocoder
+    const v = Params.friendlyValue(type);
+    assert.strictEqual(v.text, 'Vocoder');
+
+    const cf = fields.find((f) => f.key === 'VCF.Cutoff');
+    assert.ok(cf, 'VCF.Cutoff presente');
+    assert.strictEqual(cf.raw, cutoff);
+  });
+
+  await test('describe() su corpo senza tag usa il fallback legacy', () => {
+    const data = new Uint8Array(4672);
+    const rows = Params.describe(data).rows;
+    assert.ok(rows.length > 5);
+    const cutoff = rows.find((r) => r.label === 'Cutoff');
+    assert.ok(cutoff);
+    assert.strictEqual(cutoff.value, '0%');
+  });
+
+  // ================================================================== LIBRERIA
+  console.log('Libreria (collezioni e ordinamento):');
+
+  const mkPreset = (name) => {
+    const data = new Uint8Array(4672);
+    return { name, category: 0, p1: 0, data };
+  };
+
+  await test('add con collectionId e ordinamento move/moveBy', async () => {
+    await Library.load();
+    const a = Library.add(mkPreset('A'), {});
+    const b = Library.add(mkPreset('B'), {});
+    const c = Library.add(mkPreset('C'), {});
+    const names = () => Library.all().map((e) => e.name);
+    assert.deepStrictEqual(names(), ['A', 'B', 'C']);
+
+    Library.move(c.id, a.id, false); // C prima di A
+    assert.deepStrictEqual(names(), ['C', 'A', 'B']);
+
+    Library.move(a.id, b.id, true); // A dopo B
+    assert.deepStrictEqual(names(), ['C', 'B', 'A']);
+
+    Library.moveBy(b.id, +1); // B scambia con A
+    assert.deepStrictEqual(names(), ['C', 'A', 'B']);
+
+    Library.moveBy(c.id, -1); // C già primo: nessun cambiamento
+    assert.deepStrictEqual(names(), ['C', 'A', 'B']);
+
+    Library.move(c.id, c.id, true); // su se stesso: nessun cambiamento
+    assert.deepStrictEqual(names(), ['C', 'A', 'B']);
+  });
+
+  await test('collezioni: creazione, assegnazione, eliminazione', async () => {
+    const entriesBefore = Library.all();
+    for (const e of entriesBefore) Library.remove(e.id);
+
+    const col = Library.addCollection('Pack Test');
+    assert.ok(col > 0);
+    assert.strictEqual(Library.collectionName(col), 'Pack Test');
+
+    const p = Library.add(mkPreset('InCollezione'), { collectionId: col });
+    const q = Library.add(mkPreset('SenzaCollezione'), {});
+    assert.strictEqual(p.collectionId, col);
+    assert.strictEqual(q.collectionId, null);
+
+    Library.moveEntryToCollection(q.id, col);
+    assert.strictEqual(Library.get(q.id).collectionId, col);
+
+    Library.renameCollection(col, 'Pack Rinominata');
+    assert.strictEqual(Library.collectionName(col), 'Pack Rinominata');
+
+    Library.removeCollection(col);
+    assert.strictEqual(Library.allCollections().length, 0);
+    assert.strictEqual(Library.get(p.id).collectionId, null);
+    assert.strictEqual(Library.get(q.id).collectionId, null);
+  });
+
+  await test('i preset Init vuoti vengono ignorati (importRaw) e purgeInit li rimuove', async () => {
+    const before = Library.all().length;
+    // importRaw su voce senza corpo → null e nessuna aggiunta
+    assert.strictEqual(Library.importRaw({ name: 'Init', dataB64: '', rawHeaderB64: null }), null);
+    assert.strictEqual(Library.all().length, before);
+    assert.strictEqual(Library.isInitEntry({ dataB64: '' }), true);
+    assert.strictEqual(Library.isInitEntry({ dataB64: 'AAAA' }), false);
+    assert.strictEqual(Library.purgeInit(), 0);
+  });
+
+  await test('rating 1–5 con clamp', async () => {
+    const p = Library.add(mkPreset('Rated'), {});
+    Library.setRating(p.id, 3);
+    assert.strictEqual(Library.get(p.id).rating, 3);
+    Library.setRating(p.id, 9);
+    assert.strictEqual(Library.get(p.id).rating, 5);
+    Library.setRating(p.id, -2);
+    assert.strictEqual(Library.get(p.id).rating, 0);
+  });
+
+  await test('moveBlock sposta più preset insieme', async () => {
+    for (const e of Library.all()) Library.remove(e.id);
+    const ids = [];
+    for (const n of ['A', 'B', 'C', 'D', 'E']) ids.push(Library.add(mkPreset(n), {}).id);
+    const names = () => Library.all().map((e) => e.name);
+    assert.deepStrictEqual(names(), ['A', 'B', 'C', 'D', 'E']);
+
+    // sposta il blocco [C, D] prima di A → C D A B E
+    Library.moveBlock([ids[2], ids[3]], ids[0], false);
+    assert.deepStrictEqual(names(), ['C', 'D', 'A', 'B', 'E']);
+
+    // sposta il blocco [B, E] dopo C → C B E D A
+    Library.moveBlock([ids[1], ids[4]], ids[2], true);
+    assert.deepStrictEqual(names(), ['C', 'B', 'E', 'D', 'A']);
+  });
+
+  // ================================================================== SHIFT (dispositivo)
+  console.log('Shift sul dispositivo (planShift):');
+
+  const applyWrites = (occupied, writes) => {
+    // Ogni write {from,to} sposta il preset (identificato dallo slot d'origine
+    // "from") nello slot "to". Ricostruisce l'ordine dei preset per slot.
+    const dest = new Map(writes.map((w) => [w.from, w.to]));
+    const result = new Array(occupied.length);
+    for (let k = 0; k < occupied.length; k++) {
+      let found = null;
+      for (const x of occupied) {
+        const to = dest.has(x) ? dest.get(x) : x;
+        if (to === occupied[k]) { found = x; break; }
+      }
+      result[k] = found;
+    }
+    return result;
+  };
+
+  await test('sposta [2,3] prima di 5 → 1,4,2,3,5', () => {
+    const occupied = [1, 2, 3, 4, 5];
+    const { newSeq, writes } = Shift.planShift(occupied, [2, 3], 5, false);
+    assert.deepStrictEqual(newSeq, [1, 4, 2, 3, 5]);
+    // applicando le scritture si ottiene la nuova sequenza
+    assert.deepStrictEqual(applyWrites(occupied, writes), newSeq);
+  });
+
+  await test('sposta [1] dopo 3 → 2,3,1', () => {
+    const occupied = [1, 2, 3];
+    const { newSeq, writes } = Shift.planShift(occupied, [1], 3, true);
+    assert.deepStrictEqual(newSeq, [2, 3, 1]);
+    assert.deepStrictEqual(applyWrites(occupied, writes), newSeq);
+  });
+
+  await test('sposta [1] prima di 2 → 1,2,3 (nessuna modifica)', () => {
+    const occupied = [1, 2, 3];
+    const { newSeq, writes } = Shift.planShift(occupied, [1], 2, false);
+    assert.deepStrictEqual(newSeq, [1, 2, 3]);
+    assert.strictEqual(writes.length, 0);
+  });
+
+  await test('con slot vuoti interposti: [2,5,8], sposta 5 prima di 2 → 5,2,8', () => {
+    const occupied = [2, 5, 8];
+    const { newSeq, writes } = Shift.planShift(occupied, [5], 2, false);
+    assert.deepStrictEqual(newSeq, [5, 2, 8]);
+    assert.deepStrictEqual(applyWrites(occupied, writes), newSeq);
+    // 8 resta al suo posto: nessuna scrittura su di esso
+    assert.ok(writes.every((w) => w.from !== 8 || w.to === 8));
+  });
+
+  await test('target vuoto: [1,5,10], sposta 1 dopo slot vuoto 3 → 5,1,10', () => {
+    const occupied = [1, 5, 10];
+    const { newSeq, writes } = Shift.planShift(occupied, [1], 3, true);
+    assert.deepStrictEqual(newSeq, [5, 1, 10]);
+    assert.deepStrictEqual(applyWrites(occupied, writes), newSeq);
+  });
+
+  await test('target nel blocco spostato → nessuna operazione', () => {
+    const occupied = [1, 2, 3, 4];
+    const { writes } = Shift.planShift(occupied, [2, 3], 2, false);
+    assert.strictEqual(writes.length, 0);
+  });
+
+  await test('blocco alla fine della lista', () => {
+    const occupied = [1, 2, 3, 4, 5, 6, 7];
+    const { newSeq, writes } = Shift.planShift(occupied, [6, 7], 1, false);
+    assert.deepStrictEqual(newSeq, [6, 7, 1, 2, 3, 4, 5]);
+    assert.deepStrictEqual(applyWrites(occupied, writes), newSeq);
+  });
+
+  // ================================================================== FINE
+  console.log('');
+  console.log(`Risultato: ${pass} test superati, ${fail} falliti.`);
+  process.exit(fail ? 1 : 0);
+})().catch((e) => {
+  console.error('Errore globale nei test:', e);
+  process.exit(1);
+});

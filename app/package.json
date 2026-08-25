@@ -1,0 +1,42 @@
+{
+  "name": "managefreak",
+  "productName": "ManageFreak",
+  "version": "0.1.0",
+  "description": "Open-source preset manager for the Arturia MicroFreak (Windows/macOS/Linux)",
+  "main": "main.js",
+  "author": "ManageFreak contributors",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "start": "electron .",
+    "test": "node test/run-tests.js",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "dev.managefreak.app",
+    "productName": "ManageFreak",
+    "icon": "assets/icon.png",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "assets/**/*"
+    ],
+    "win": {
+      "target": ["nsis", "portable"]
+    },
+    "mac": {
+      "target": ["dmg", "zip"],
+      "category": "public.app-category.music"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Audio"
+    }
+  }
+}

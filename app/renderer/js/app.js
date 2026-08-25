@@ -1,0 +1,2484 @@
+// ManageFreak — logica interfaccia
+'use strict';
+
+const App = (() => {
+  // ------------------------------------------------------------------ costanti
+
+  // "Characteristics" usate da Arturia MCC per classificare le patch
+  // (ordine dei bit del campo da 18 caratteri, dal bit meno significativo).
+  const CHARACTERISTICS = Mfp.CHARACTERISTICS;
+
+  // ------------------------------------------------------------------ stato
+  const state = {
+    device: null, // array di 512 header dopo lo scan
+    devicePhase: 'empty', // empty | scanning | ready | reading
+    selectedDeviceSlots: new Set(), // multi-selezione sul dispositivo
+    devSelAnchor: null,
+    selLib: new Set(), // id dei preset selezionati in libreria
+    selAnchor: null, // ancora per la selezione con Shift
+    filterCategory: 'all', // 'all' | 'fav' | 'cat:N'
+    filterCollection: 'all', // 'all' | N (id collezione) | 'none'
+    filterTag: null,
+    filterCharacteristic: null,
+    sortMode: 'default', // 'default' | 'name' | 'rating' | 'category'
+    libView: 'grid', // 'grid' | 'list'
+    search: '',
+    deviceSearch: '',
+    activePane: 'library', // 'library' | 'device' — per la navigazione con frecce
+    firmware: null,
+    busy: false,
+    cancelRequested: false,
+    dragEntryId: null,
+  };
+
+  // ------------------------------------------------------------------ DOM
+  const $ = (id) => document.getElementById(id);
+  const el = {
+    midiInput: $('midi-input'),
+    midiOutput: $('midi-output'),
+    btnConnect: $('btn-connect'),
+    btnRefreshPorts: $('btn-refresh-ports'),
+    btnTheme: $('btn-theme'),
+    connStatus: $('connection-status'),
+    fwVersion: $('fw-version'),
+    btnReadAll: $('btn-read-all'),
+    btnCancel: $('btn-cancel'),
+    btnDownloadBank: $('btn-download-bank'),
+    btnUploadLibrary: $('btn-upload-library'),
+    deviceCounts: $('device-counts'),
+    deviceSearch: $('device-search'),
+    catList: $('cat-list'),
+    tagList: null,
+    charList: $('char-list'),
+    btnImport: $('btn-import'),
+    btnBackup: $('btn-backup'),
+    search: $('search'),
+    libraryView: $('library-view'),
+    slotList: $('slot-list'),
+    libGrid: $('lib-grid'),
+    libraryCount: $('library-count'),
+    detailEmpty: $('detail-empty'),
+    detail: $('detail'),
+    detailName: $('detail-name'),
+    detailMeta: $('detail-meta'),
+    detailTags: $('detail-tags'),
+    detailAddTag: $('detail-add-tag'),
+    detailNotesBox: $('detail-notes-box'),
+    detailNotes: $('detail-notes'),
+    detailActions: $('detail-actions'),
+    detailParams: $('detail-params'),
+    statusText: $('status-text'),
+    progressWrap: $('progress-wrap'),
+    progressFill: $('progress-fill'),
+    progressText: $('progress-text'),
+    modalBackdrop: $('modal-backdrop'),
+    modalTitle: $('modal-title'),
+    modalBody: $('modal-body'),
+    modalCancel: $('modal-cancel'),
+    modalOk: $('modal-ok'),
+    toast: $('toast'),
+  };
+
+  // ------------------------------------------------------------------ utilità
+
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+
+  let toastTimer = null;
+  function toast(msg, kind = '', ms = 3200) {
+    el.toast.textContent = msg;
+    el.toast.className = kind;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.toast.classList.add('hidden'), ms);
+  }
+
+  function status(msg) {
+    el.statusText.textContent = msg;
+  }
+
+  function setProgress(frac, text) {
+    if (frac === null) {
+      el.progressWrap.classList.add('hidden');
+      return;
+    }
+    el.progressWrap.classList.remove('hidden');
+    el.progressFill.style.width = `${Math.round(frac * 100)}%`;
+    el.progressText.textContent = text || '';
+  }
+
+  function setBusy(busy, label) {
+    state.busy = busy;
+    el.btnReadAll.disabled = busy;
+    el.btnImport.disabled = busy;
+    el.btnUploadLibrary.disabled = busy;
+    el.btnDownloadBank.disabled = busy;
+    if (!busy) {
+      el.btnCancel.classList.add('hidden');
+      status('Ready.');
+    } else {
+      status(label || 'Working…');
+    }
+  }
+
+  function catName(idx) {
+    return MF.CATEGORIES[idx] || '';
+  }
+
+  // ------------------------------------------------------------------ tema
+
+  function applyTheme(theme) {
+    const light = theme === 'light';
+    document.documentElement.dataset.theme = light ? 'light' : 'dark';
+    el.btnTheme.textContent = light ? '☀️' : '🌙';
+    el.btnTheme.title = light ? 'Switch to dark theme' : 'Switch to light theme';
+    try { localStorage.setItem('managefreak-theme', light ? 'light' : 'dark'); } catch { /* ignora */ }
+  }
+
+  function catColor(idx) {
+    const colors = ['#e05d5d', '#e8a25a', '#e8c25a', '#8ec96b', '#43c47c', '#43c4a9',
+      '#5ab3e8', '#6d7bd6', '#a07bd6', '#d67bc4', '#9a9aab', '#e86b6b'];
+    return colors[idx % colors.length] || '#9a9aab';
+  }
+
+  // ------------------------------------------------------------------ modal
+
+  function showModal(title, bodyHTML, { okLabel = 'OK', onOk = null, hideCancel = false } = {}) {
+    return new Promise((resolve) => {
+      el.modalTitle.textContent = title;
+      el.modalBody.innerHTML = bodyHTML;
+      el.modalOk.textContent = okLabel;
+      el.modalOk.classList.toggle('hidden', hideCancel);
+      el.modalCancel.classList.toggle('hidden', hideCancel);
+      el.modalBackdrop.classList.remove('hidden');
+
+      const close = (result) => {
+        el.modalBackdrop.classList.add('hidden');
+        el.modalOk.onclick = null;
+        el.modalCancel.onclick = null;
+        resolve(result);
+      };
+
+      el.modalOk.onclick = () => {
+        let ok = true;
+        if (onOk) {
+          try {
+            const r = onOk();
+            if (r === false) ok = false;
+          } catch (e) {
+            toast(String(e.message || e), 'err');
+            ok = false;
+          }
+        }
+        if (ok) close(true);
+      };
+      el.modalCancel.onclick = () => close(false);
+      el.modalBackdrop.onclick = (e) => {
+        if (e.target === el.modalBackdrop) close(false);
+      };
+    });
+  }
+
+  // ------------------------------------------------------------------ MIDI / porte
+
+  async function refreshPorts() {
+    if (!Midi.supported()) {
+      toast('Web MIDI is not available in this environment.', 'err', 6000);
+      return;
+    }
+    try {
+      await Midi.refresh();
+    } catch (e) {
+      toast('MIDI access denied: ' + (e.message || e), 'err', 6000);
+      return;
+    }
+    const inputs = Midi.inputs();
+    const outputs = Midi.outputs();
+
+    const fill = (select, ports, emptyLabel) => {
+      const prev = select.value;
+      select.innerHTML = '';
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = emptyLabel;
+      select.appendChild(opt);
+      for (const p of ports) {
+        const o = document.createElement('option');
+        o.value = p.id;
+        o.textContent = p.name;
+        if (p.manufacturer) o.textContent += ` (${p.manufacturer})`;
+        select.appendChild(o);
+      }
+      if (prev && Array.from(select.options).some((o) => o.value === prev)) select.value = prev;
+      else if (ports.length) select.value = ports[0].id;
+    };
+
+    fill(el.midiInput, inputs, '— MIDI input —');
+    fill(el.midiOutput, outputs, '— MIDI output —');
+
+    // auto-selezione del MicroFreak se presente
+    const autoPick = (select, keyword) => {
+      if (select.value) return;
+      const o = Array.from(select.options).find((x) => x.textContent.toLowerCase().includes(keyword));
+      if (o) select.value = o.value;
+    };
+    autoPick(el.midiInput, 'microfreak');
+    autoPick(el.midiOutput, 'microfreak');
+  }
+
+  async function connect() {
+    const inId = el.midiInput.value;
+    const outId = el.midiOutput.value;
+    if (!inId || !outId) {
+      toast('Select both a MIDI input and output.', 'err');
+      return;
+    }
+    try {
+      await Midi.open(inId, outId);
+      el.connStatus.className = 'status-dot online';
+      el.connStatus.title = `Connected: ${Midi.currentNames().output}`;
+      status('Connected to the MicroFreak. Auto-scanning…');
+      // firmware + scansione automatica della libreria del dispositivo
+      setTimeout(async () => {
+        await detectFirmware();
+        await scanDevice();
+      }, 250);
+    } catch (e) {
+      el.connStatus.className = 'status-dot error';
+      toast('Connection failed: ' + (e.message || e), 'err', 6000);
+    }
+  }
+
+  /** Legge la versione firmware dall'identity reply e la mostra nel titolo. */
+  async function detectFirmware() {
+    try {
+      const fw = await Midi.identity(1500);
+      if (fw) {
+        state.firmware = fw;
+        el.fwVersion.textContent = `FW ${fw}`;
+        el.fwVersion.classList.remove('hidden');
+      }
+    } catch {
+      /* firmware non disponibile */
+    }
+  }
+
+  /** Scarica l'intera bank del MicroFreak in un file .mfprojz datato. */
+  async function downloadBankToPC() {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    if (!state.device) return toast('Scan the MicroFreak library first.', 'err');
+    const occupied = state.device.filter((h) => h && !h.empty && !h.error);
+    if (!occupied.length) return toast('No occupied presets to download.', 'err');
+    const est = Math.max(1, Math.round((occupied.length * 0.55) / 60)); // minuti circa
+    const yes = await showModal(
+      `Download the bank (${occupied.length} presets) to PC?`,
+      `<p>All occupied presets will be read (about ${est} minutes, cancellable) and saved
+       into a single <strong>.mfprojz</strong> file compatible with Arturia MIDI Control Center,
+       named <code>MicroFreak-Bank-date-time.mfprojz</code>.</p>`,
+      { okLabel: 'Download bank' }
+    );
+    if (!yes) return;
+
+    setBusy(true, 'Scaricamento della bank…');
+    el.btnCancel.classList.remove('hidden');
+    state.cancelRequested = false;
+    const presets = [];
+    try {
+      for (let i = 0; i < occupied.length; i++) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        const h = occupied[i];
+        const preset = await MF.readPreset(h.slot, { timeoutMs: 4000 });
+        if (preset.data) presets.push({ slot: h.slot, name: preset.name, category: preset.category, p1: preset.p1, data: preset.data });
+        setProgress((i + 1) / occupied.length, `Reading slot ${h.slot}…`);
+      }
+    } catch (e) {
+      toast('Download interrupted: ' + (e.message || e), 'err', 6000);
+      return;
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+    if (!presets.length) return toast('No presets read.', 'err');
+
+    try {
+      setBusy(true, 'Creating .mfprojz file…');
+      const bytes = await Mfp.serializeMfprojz(presets);
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+      const path = await window.mfapi.saveFile({
+        defaultName: `MicroFreak-Bank-${stamp}.mfprojz`,
+        data: Mfp.bytesToB64(bytes),
+        filters: [{ name: 'MicroFreak project (MCC)', extensions: ['mfprojz'] }],
+      });
+      if (path) toast(`Bank saved to ${path} (${presets.length} presets) ✓`, 'ok', 6000);
+    } catch (e) {
+      toast('File creation failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Carica l'intera libreria PC sul MicroFreak (slot 1..N), con conferma. */
+  async function uploadLibraryToDevice() {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    const entries = Library.all().filter((e) => e.dataB64 && !isInitNamed(e));
+    if (!entries.length) return toast('The library is empty.', 'err');
+    const n = Math.min(entries.length, 512);
+    const est = Math.max(1, Math.round((n * 1.1) / 60));
+    const yes = await showModal(
+      `Upload ${n} library presets to the MicroFreak?`,
+      `<p>The first <strong>${n}</strong> library presets will be written to the first <strong>${n}</strong> slots
+       (1–${n}), overwriting the current content. Each slot is read as a backup and restored on error.</p>
+       <p class="muted" style="font-size:12px">Estimated time: about ${est} minutes. You can cancel at any time.</p>`,
+      { okLabel: 'Upload to MicroFreak' }
+    );
+    if (!yes) return;
+
+    setBusy(true, 'Uploading library…');
+    el.btnCancel.classList.remove('hidden');
+    state.cancelRequested = false;
+    let done = 0;
+    let failed = 0;
+    try {
+      for (let i = 0; i < n; i++) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        const entry = Library.get(entries[i].id);
+        if (!entry || !entry.data) { failed++; done++; continue; }
+        const slot = i + 1;
+        let backup = null;
+        try {
+          const cur = await MF.readHeader(slot, 4000);
+          if (!cur.empty) backup = await MF.readPreset(slot, { timeoutMs: 4000 });
+          await MF.writePreset(slot, {
+            name: entry.name,
+            category: typeof entry.category === 'number' && entry.category >= 0 ? entry.category : 0,
+            p1: entry.p1 || 0,
+            data: entry.data,
+          }, { timeoutMs: 4000 });
+          const h = await MF.readHeader(slot, 4000);
+          if (h.empty || h.name !== entry.name) throw new Error('verifica header fallita');
+          state.device[slot - 1] = {
+            slot, name: entry.name,
+            category: typeof entry.category === 'number' && entry.category >= 0 ? entry.category : 0,
+            p1: entry.p1 || 0, empty: false,
+          };
+        } catch (e) {
+          failed++;
+          if (backup && backup.data) {
+            try {
+              await MF.writePreset(slot, { name: backup.name, category: backup.category, p1: backup.p1, data: backup.data }, { timeoutMs: 4000 });
+            } catch { /* ripristino non riuscito */ }
+          }
+        }
+        done++;
+        setProgress(done / n, `Slot ${slot}/${n}…`);
+      }
+      renderDevice();
+      toast(`Uploaded ${n - failed} presets to the MicroFreak${failed ? `, ${failed} errors` : ''} ✓`, 'ok', 6000);
+    } catch (e) {
+      toast('Upload interrupted: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }
+
+  // ------------------------------------------------------------------ scansione dispositivo
+
+  async function scanDevice() {
+    if (!Midi.isOpen()) {
+      toast('Connetti prima le porte MIDI.', 'err');
+      return;
+    }
+    setBusy(true, 'Scanning 512 presets…');
+    el.btnCancel.classList.remove('hidden');
+    state.cancelRequested = false;
+    state.devicePhase = 'scanning';
+    state.device = new Array(512).fill(null);
+    try {
+      const headers = await MF.scanHeaders({
+        onProgress: (done, total) => {
+          setProgress(done / total, `${done}/${total}`);
+          if (state.cancelRequested) throw new Error('Operation cancelled');
+        },
+        onError: (slot, e) => { /* kept as an error in the row */ },
+      });
+      state.device = headers;
+      state.devicePhase = 'ready';
+      status('Scan complete.');
+      renderDevice();
+    } catch (e) {
+      state.devicePhase = 'ready';
+      status(String(e.message || e));
+      renderDevice();
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }
+
+  function targetCollectionId() {
+    if (state.filterCollection !== 'all' && state.filterCollection !== 'none') {
+      return parseInt(state.filterCollection, 10);
+    }
+    return null;
+  }
+
+  async function readAllOccupied() {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    if (!state.device) return toast('Scan the preset names first.', 'err');
+    const occupied = state.device.filter((h) => h && !h.empty && !h.error);
+    if (!occupied.length) return toast('No occupied presets found.', 'err');
+
+    const est = Math.max(1, Math.round((occupied.length * 0.55) / 60)); // minuti circa
+    const collections = Library.allCollections();
+    const collOpts = collections.map((c) =>
+      `<option value="${c.id}" ${String(targetCollectionId()) === String(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+    const yes = await showModal(
+      `Read ${occupied.length} presets from the device?`,
+      `<p>This transfers the full preset bodies into the local library
+       and takes about ${est} minutes. You can cancel at any time. Init presets are skipped.</p>
+       <label><input type="checkbox" id="opt-skip-existing" checked /> Skip presets already in the library</label>
+       <div class="field"><label>Destination library</label>
+         <select id="m-coll">
+           <option value="">— No library (general collection) —</option>
+           ${collOpts}
+         </select></div>`,
+      { okLabel: 'Start reading' }
+    );
+    if (!yes) return;
+
+    const skipExisting = $('opt-skip-existing') && $('opt-skip-existing').checked;
+    const collectionId = $('m-coll').value ? parseInt($('m-coll').value, 10) : null;
+    const existingNames = new Set(Library.all().map((e) => `${e.sourceSlot}|${e.name}`));
+    const todo = occupied.filter((h) => {
+      if (isInitNamed(h)) return false; // gli Init non entrano in libreria
+      return !skipExisting || !existingNames.has(`${h.slot}|${h.name}`);
+    });
+    if (!todo.length) return toast('All occupied presets are already in the library (or are Init).', 'ok');
+
+    setBusy(true, `Reading presets from the device…`);
+    el.btnCancel.classList.remove('hidden');
+    state.cancelRequested = false;
+    let added = 0;
+    let errors = 0;
+    try {
+      await MF.readMany(todo.map((h) => h.slot), {
+        shouldCancel: () => state.cancelRequested,
+        onProgress: ({ slot, slotIndex, slotCount, part, parts, error }) => {
+          if (error) {
+            errors++;
+            return;
+          }
+          const frac = (slotIndex + (part > 0 ? part / parts : 0)) / slotCount;
+          setProgress(frac, `Slot ${slot} — part ${part}/${parts}`);
+        },
+        onSlot: (preset) => {
+          if (isInitNamed(preset)) return;
+          Library.add(preset, { sourceName: `Device slot ${preset.slot}`, collectionId });
+          added++;
+        },
+      });
+      status(`Reading complete: ${added} presets added, ${errors} errors.`);
+      toast(`Added ${added} presets to the library.`, 'ok');
+      renderDevice();
+    } catch (e) {
+      status(String(e.message || e));
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }
+
+  // ------------------------------------------------------------------ scrittura con guardia
+
+  async function writeToSlot(slot, entry, { selectAfter = true } = {}) {
+    if (!Midi.isOpen()) {
+      toast('Connetti prima le porte MIDI.', 'err');
+      return false;
+    }
+    if (!entry.data || entry.data.length !== MF.DATALEN) {
+      toast('The preset has no valid body.', 'err');
+      return false;
+    }
+    setBusy(true, `Writing preset to slot ${slot}…`);
+    let backup = null;
+    let backupSlot = null;
+    try {
+      // backup del contenuto attuale
+      const current = await MF.readHeader(slot);
+      if (!current.empty) {
+        backup = await MF.readPreset(slot);
+        backupSlot = slot;
+      }
+
+      await MF.writePreset(slot, {
+        name: entry.name,
+        category: entry.category >= 0 ? entry.category : 0,
+        p1: entry.p1 !== undefined ? entry.p1 : 0,
+        rawHeader: entry.rawHeader,
+        data: entry.data,
+      });
+
+      // verifica readback
+      const rb = await MF.readPreset(slot);
+      let ok = rb.data && rb.data.length === MF.DATALEN;
+      if (ok) {
+        for (let i = 0; i < rb.data.length; i++) {
+          if (rb.data[i] !== entry.data[i]) { ok = false; break; }
+        }
+      }
+      if (!ok) throw new Error('The readback does not match the written preset.');
+
+      // aggiorna la scansione in memoria
+      if (state.device && state.device[slot - 1]) {
+        state.device[slot - 1] = rb;
+        renderDevice();
+      }
+      if (selectAfter) MF.selectPreset(slot);
+      toast(`"${entry.name}" written to slot ${slot} ✓`, 'ok');
+      return true;
+    } catch (e) {
+      toast('Write failed: ' + (e.message || e), 'err', 6000);
+      if (backup && backup.data) {
+        status('Restoring original content…');
+        try {
+          await MF.writePreset(slot, {
+            name: backup.name,
+            category: backup.category,
+            p1: backup.p1,
+            rawHeader: backup.rawHeader,
+            data: backup.data,
+          });
+          toast('Original content restored ✓', 'ok');
+        } catch (e2) {
+          toast('WARNING: even the restore failed! (' + (e2.message || e2) + ')', 'err', 8000);
+        }
+      }
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function writeToSlotWithDialog(entry) {
+    const ok = await showModal(
+      `Write "${entry.name}" to the device`,
+      `<p>Which slot should the preset be written to? (1–512)</p>
+       <input id="m-slot" type="number" min="1" max="512" value="1" />
+       <p class="muted" style="font-size:12px">The current slot content is read as a backup
+       and restored automatically if verification fails.</p>
+       <label><input type="checkbox" id="m-select" checked /> Select the preset on the synth after writing</label>`,
+      {
+        okLabel: 'Send to MicroFreak',
+        onOk: () => {
+          const slot = parseInt($('m-slot').value, 10);
+          if (!slot || slot < 1 || slot > 512) {
+            toast('Invalid slot (1–512).', 'err');
+            return false;
+          }
+          $('m-slot').dataset.slot = String(slot);
+        },
+      }
+    );
+    if (!ok) return false;
+    const slot = parseInt($('m-slot').dataset.slot, 10);
+    const selectAfter = $('m-select').checked;
+    return writeToSlot(slot, entry, { selectAfter });
+  }
+
+  // ------------------------------------------------------------------ rendering dispositivo
+
+  function renderDevice() {
+    const list = el.slotList;
+    if (!state.device) {
+      list.innerHTML = `<div class="hint" style="padding:8px">Connect the MicroFreak and pick the ports at the top: preset scanning starts automatically.</div>`;
+      el.deviceCounts.textContent = '';
+      return;
+    }
+    const q = state.deviceSearch.trim().toLowerCase();
+    const isInit = (h) => h && !h.empty && !h.error && (h.name || '').trim() === 'Init';
+    const occupied = state.device.filter((h) => h && !h.empty && !h.error && !isInit(h));
+    const free = state.device.filter((h) => h && !h.error && (h.empty || isInit(h)));
+    el.deviceCounts.textContent = `${occupied.length} used · ${free.length} free`;
+
+    let html = '';
+    for (const h of state.device) {
+      const slot = h ? h.slot : 0;
+      const statusTxt = !h ? 'unread' : h.error ? 'error' : h.empty ? 'empty' : '';
+      const empty = !h || !!h.error || !!h.empty;
+      const isInit = h && !h.error && !h.empty && (h.name || '').trim() === 'Init';
+      const name = h && !h.error ? (h.name || '') : '';
+      if (q && !name.toLowerCase().includes(q) && !statusTxt.includes(q)) continue;
+      const cat = h && !h.error && !h.empty ? h.category : -1;
+      const rowClass = [
+        'slot-row',
+        empty ? 'empty-row' : '',
+        isInit ? 'init-row' : '',
+        h && h.error ? 'err-row' : '',
+        state.selectedDeviceSlots.has(slot) ? 'selected' : '',
+      ].join(' ');
+      const catChip = cat >= 0
+        ? `<span class="slot-cat-name" style="color:${catColor(cat)};border:1px solid ${catColor(cat)}55">${esc(catName(cat))}</span>`
+        : '';
+      html += `
+        <div class="${rowClass}" data-slot="${slot}" draggable="${empty ? 'false' : 'true'}" title="${esc(name)}">
+          <span class="slot-num">${slot}</span>
+          <span class="slot-name">${esc(statusTxt || name)}</span>
+          ${catChip}
+        </div>`;
+    }
+    list.innerHTML = html;
+
+    list.querySelectorAll('.slot-row').forEach((row) => {
+      const slot = parseInt(row.dataset.slot, 10);
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        handleDeviceSelect(e, slot);
+      });
+      // drag da dispositivo → libreria PC o verso un altro slot (scambio/shift)
+      row.addEventListener('dragstart', (e) => {
+        // il preset afferrato diventa quello attivo (se non era selezionato)
+        if (!state.selectedDeviceSlots.has(slot)) {
+          state.selectedDeviceSlots = new Set([slot]);
+          state.devSelAnchor = slot;
+          syncDeviceSelectionVisuals();
+          renderDeviceSelBar();
+        }
+        state.dragDeviceBlock = state.selectedDeviceSlots.has(slot) && state.selectedDeviceSlots.size > 1
+          ? deviceSelIds().filter((s) => {
+              const h = state.device && state.device[s - 1];
+              return h && !h.empty && !h.error;
+            })
+          : null;
+        e.dataTransfer.setData('application/x-managefreak-slot', String(slot));
+        e.dataTransfer.setData('text/plain', String(slot));
+        e.dataTransfer.effectAllowed = 'copyMove';
+        startDragScroll('device');
+      });
+      row.addEventListener('dragend', () => {
+        state.dragDeviceBlock = null;
+        stopDragScroll();
+      });
+    });
+    renderDeviceSelBar();
+  }
+
+  // ------------------------------------------------------------------ multi-selezione dispositivo
+
+  function handleDeviceSelect(e, slot) {
+    state.activePane = 'device';
+    const ctrl = e.ctrlKey || e.metaKey;
+    const shift = e.shiftKey;
+    if (ctrl) {
+      if (state.selectedDeviceSlots.has(slot)) state.selectedDeviceSlots.delete(slot);
+      else {
+        state.selectedDeviceSlots.add(slot);
+        state.devSelAnchor = slot;
+      }
+    } else if (shift) {
+      const anchor = state.devSelAnchor !== null && state.selectedDeviceSlots.has(state.devSelAnchor) ? state.devSelAnchor : slot;
+      const [a, b] = anchor < slot ? [anchor, slot] : [slot, anchor];
+      state.selectedDeviceSlots.clear();
+      for (let s = a; s <= b; s++) state.selectedDeviceSlots.add(s);
+    } else {
+      state.selectedDeviceSlots.clear();
+      state.selectedDeviceSlots.add(slot);
+      state.devSelAnchor = slot;
+    }
+    updateDeviceSelectionUI();
+  }
+
+  function clearDeviceSelection() {
+    state.selectedDeviceSlots.clear();
+    state.devSelAnchor = null;
+    updateDeviceSelectionUI();
+  }
+
+  function deviceSelIds() {
+    return Array.from(state.selectedDeviceSlots).sort((a, b) => a - b);
+  }
+
+  function updateDeviceSelectionUI() {
+    renderDevice();
+    syncDeviceDetailToSelection();
+  }
+
+  function syncDeviceDetailToSelection() {
+    const ids = deviceSelIds();
+    if (!ids.length) showDetailEmpty();
+    else if (ids.length === 1) showDeviceDetail(ids[0]);
+    else showMultiDeviceDetail(ids);
+  }
+
+  function renderDeviceSelBar() {
+    const bar = document.getElementById('device-selbar');
+    const count = document.getElementById('device-sel-count');
+    if (!bar) return;
+    const n = state.selectedDeviceSlots.size;
+    bar.querySelectorAll('button').forEach((b) => {
+      b.disabled = n === 0;
+    });
+    if (count) count.textContent = `${n} selected`;
+  }
+
+  function showMultiDeviceDetail(slots) {
+    renderDetail({
+      name: `${slots.length} slots selected`,
+      metaRows: [['Slots', slots.join(', ')]],
+      tags: [],
+      tagInput: null,
+      notes: null,
+      actions: [
+        { id: 'read', label: '⬅ Fetch library to PC', run: () => readDeviceSelectionToLibrary() },
+      ],
+      params: [],
+    });
+  }
+
+  async function readDeviceSelectionToLibrary() {
+    const slots = deviceSelIds().filter((s) => {
+      const h = state.device && state.device[s - 1];
+      return h && !h.empty && !h.error && !isInitNamed(h);
+    });
+    if (!slots.length) return toast('No occupied (non-Init) slots among the selection.', 'err');
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    setBusy(true, `Reading ${slots.length} slots…`);
+    const collectionId = targetCollectionId();
+    let added = 0;
+    for (const s of slots) {
+      try {
+        const preset = await MF.readPreset(s);
+        if (preset.data && !isInitNamed(preset)) {
+          Library.add(preset, { sourceName: `Device slot ${s}`, collectionId });
+          added++;
+        }
+      } catch { /* continue with the next one */ }
+    }
+    setBusy(false);
+    toast(`Added ${added} presets to the library ✓`, 'ok');
+  }
+
+  /** Moves one or more presets to another position, shifting the others,
+   *  with confirmation, verification and automatic rollback. */
+  async function moveDeviceSelectionTo(movedSlots, targetSlot, after) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    if (!state.device) return;
+    const moved = Array.from(new Set(movedSlots)).sort((a, b) => a - b);
+    if (!moved.length || moved.includes(targetSlot)) return;
+
+    const occupied = state.device
+      .map((h, i) => (h && !h.empty && !h.error ? i + 1 : null))
+      .filter((s) => s !== null);
+    const validMoved = moved.filter((s) => occupied.includes(s));
+    if (!validMoved.length) return toast('The selected slots do not contain presets.', 'err');
+
+    // pianifica la nuova sequenza e le scritture necessarie
+    const { writes } = Shift.planShift(occupied, moved, targetSlot, after);
+    if (!writes.length) return;
+
+    // nomi per la conferma
+    const movedNames = validMoved.map((s) => {
+      const h = state.device[s - 1];
+      return h ? h.name || `slot ${s}` : `slot ${s}`;
+    });
+    const targetName = occupied.includes(targetSlot)
+      ? (state.device[targetSlot - 1] && state.device[targetSlot - 1].name) || `slot ${targetSlot}`
+      : `empty slot ${targetSlot}`;
+
+    const yes = await showModal(
+      `Move ${validMoved.length} presets?`,
+      `<p><strong>${validMoved.length} presets</strong> will be moved:
+         <strong>${esc(movedNames.join(', '))}</strong></p>
+       <p>Position: <strong>${after ? 'after' : 'before'} "${esc(targetName)}"</strong>.</p>
+       <p class="muted" style="font-size:12px">The other presets will be <strong>shifted accordingly</strong>
+       (this is not a one-to-one swap). All involved presets are read as backups and restored on error.
+       This may take a few minutes and can be cancelled.</p>`,
+      { okLabel: 'Move & shift' }
+    );
+    if (!yes) return;
+
+    setBusy(true, 'Reading the involved presets…');
+    el.btnCancel.classList.remove('hidden');
+    state.cancelRequested = false;
+
+    try {
+      // 1. backup of all sources
+      const backup = new Map();
+      for (let i = 0; i < writes.length; i++) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        const w = writes[i];
+        const preset = await MF.readPreset(w.from, { timeoutMs: 4000 });
+        if (!preset.data) throw new Error(`Slot ${w.from} does not contain a readable preset.`);
+        backup.set(w.from, preset);
+        setProgress(i / writes.length, `Backing up slot ${w.from}…`);
+        await MF.sleep(10);
+      }
+
+      // 2. write the new positions
+      for (let k = 0; k < writes.length; k++) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        const w = writes[k];
+        const preset = backup.get(w.from);
+        await MF.writePreset(w.to, {
+          name: preset.name,
+          category: preset.category,
+          p1: preset.p1,
+          data: preset.data,
+        }, { timeoutMs: 4000 });
+        setProgress((k + 1) / writes.length, `Writing slot ${w.to}…`);
+        await MF.sleep(10);
+      }
+      setProgress(0.98, 'Verifying…');
+
+      // 3. verification: header for all written positions (quick) + full
+      //    body only for the actually moved block (at risk)
+      for (const w of writes) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        const expected = backup.get(w.from);
+        const h = await MF.readHeader(w.to, 4000);
+        if (h.empty || h.name !== expected.name) {
+          throw new Error(`Verification of slot ${w.to} failed.`);
+        }
+      }
+      for (const s of validMoved) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        const expected = backup.get(s);
+        const w = writes.find((x) => x.from === s);
+        const rb = await MF.readPreset(w ? w.to : s, { timeoutMs: 4000 });
+        if (!rb.data || !bytesEqual(rb.data, expected.data)) {
+          throw new Error(`Body verification of slot ${w ? w.to : s} failed.`);
+        }
+      }
+
+      // 4. aggiorna gli header in memoria (solo le posizioni cambiate)
+      for (const w of writes) {
+        const preset = backup.get(w.from);
+        state.device[w.to - 1] = {
+          slot: w.to,
+          name: preset.name,
+          category: preset.category,
+          p1: preset.p1,
+          empty: false,
+        };
+      }
+      renderDevice();
+      toast(`Moved ${validMoved.length} presets ✓`, 'ok');
+    } catch (e) {
+      toast('Move failed: ' + (e.message || e), 'err', 6000);
+      // automatic rollback
+      if (backup && backup.size) {
+        status('Restoring the original presets…');
+        try {
+          for (const [from, preset] of backup) {
+            await MF.writePreset(from, {
+              name: preset.name,
+              category: preset.category,
+              p1: preset.p1,
+              data: preset.data,
+            }, { timeoutMs: 4000 });
+          }
+          toast('Original presets restored ✓', 'ok');
+        } catch (e2) {
+          toast('WARNING: even the restore failed! (' + (e2.message || e2) + ')', 'err', 8000);
+        }
+      }
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }
+
+  /** One-to-one swap between two occupied slots, with confirmation, verification and rollback. */
+  async function swapDeviceSlots(a, b) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    if (a === b) return;
+    setBusy(true, `Reading slots ${a} and ${b}…`);
+    let pa = null;
+    let pb = null;
+    try {
+      pa = await MF.readPreset(a, { timeoutMs: 4000 });
+      pb = await MF.readPreset(b, { timeoutMs: 4000 });
+      if (!pa.data || !pb.data) {
+        toast('Swapping requires two occupied slots.', 'err', 6000);
+        return;
+      }
+      const yes = await showModal(
+        `Swap slots ${a} and ${b}?`,
+        `<p><strong>"${esc(pa.name)}"</strong> (slot ${a}) ⇄ <strong>"${esc(pb.name)}"</strong> (slot ${b})</p>
+         <p class="muted" style="font-size:12px">One-to-one swap: both presets are read as backups
+         and restored on error.</p>`,
+        { okLabel: 'Swap' }
+      );
+      if (!yes) return;
+
+      await MF.writePreset(b, { name: pa.name, category: pa.category, p1: pa.p1, data: pa.data }, { timeoutMs: 4000 });
+      await MF.writePreset(a, { name: pb.name, category: pb.category, p1: pb.p1, data: pb.data }, { timeoutMs: 4000 });
+
+      const rbA = await MF.readPreset(a, { timeoutMs: 4000 });
+      const rbB = await MF.readPreset(b, { timeoutMs: 4000 });
+      if (!rbA.data || !rbB.data || !bytesEqual(rbA.data, pb.data) || !bytesEqual(rbB.data, pa.data)) {
+        throw new Error('Swap verification failed.');
+      }
+
+      if (state.device) {
+        state.device[a - 1] = { slot: a, name: pb.name, category: pb.category, p1: pb.p1, empty: false };
+        state.device[b - 1] = { slot: b, name: pa.name, category: pa.category, p1: pa.p1, empty: false };
+        renderDevice();
+      }
+      toast(`Swapped slots ${a} ⇄ ${b} ✓`, 'ok');
+    } catch (e) {
+      toast('Swap failed: ' + (e.message || e), 'err', 6000);
+      if (pa && pb && pa.data && pb.data) {
+        status('Restoring the original presets…');
+        try {
+          await MF.writePreset(a, { name: pa.name, category: pa.category, p1: pa.p1, data: pa.data }, { timeoutMs: 4000 });
+          await MF.writePreset(b, { name: pb.name, category: pb.category, p1: pb.p1, data: pb.data }, { timeoutMs: 4000 });
+          toast('Original presets restored ✓', 'ok');
+        } catch (e2) {
+          toast('WARNING: even the restore failed! (' + (e2.message || e2) + ')', 'err', 8000);
+        }
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Initializes (deletes) one or more presets on the device by writing the
+   *  firmware Init template. With backup, confirmation and verification. */
+  async function initDeviceSlots(slots) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    const occupiedSlots = (Array.isArray(slots) ? slots : [slots]).filter((s) => {
+      const h = state.device && state.device[s - 1];
+      return h && !h.empty && !h.error;
+    });
+    if (!occupiedSlots.length) return toast('No occupied presets to delete.', 'err');
+
+    const yes = await showModal(
+      `Initialize ${occupiedSlots.length} presets on the MicroFreak?`,
+      `<p>The selected slots will be reset to the <strong>Init</strong> preset (default sound).</p>
+       <p class="muted" style="font-size:12px">The MicroFreak protocol cannot create a truly "empty" slot:
+       the preset is replaced by the firmware's Init. Each preset is backed up before proceeding,
+       but the operation is still irreversible for the previous sound.</p>`,
+      { okLabel: 'Initialize' }
+    );
+    if (!yes) return;
+
+    setBusy(true, 'Reading the Init template…');
+    el.btnCancel.classList.remove('hidden');
+    state.cancelRequested = false;
+    const backups = new Map();
+    try {
+      const template = await MF.readInitTemplate(4000);
+      if (!template.data) throw new Error('Unable to read the firmware Init template.');
+
+      // backup of the presets to initialize
+      for (const s of occupiedSlots) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        const p = await MF.readPreset(s, { timeoutMs: 4000 });
+        if (p.data) backups.set(s, p);
+      }
+
+      // write Init
+      for (let i = 0; i < occupiedSlots.length; i++) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        const s = occupiedSlots[i];
+        await MF.writePreset(s, { name: 'Init', category: 0, p1: 0, data: template.data }, { timeoutMs: 4000 });
+        setProgress((i + 1) / occupiedSlots.length, `Init slot ${s}…`);
+      }
+
+      // header verification
+      for (const s of occupiedSlots) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        const h = await MF.readHeader(s, 4000);
+        if (h.empty || h.name !== 'Init') throw new Error(`Verification of slot ${s} failed.`);
+      }
+
+      for (const s of occupiedSlots) {
+        state.device[s - 1] = { slot: s, name: 'Init', category: 0, p1: 0, empty: false };
+      }
+      state.selectedDeviceSlots.clear();
+      state.devSelAnchor = null;
+      renderDevice();
+      toast(`Initialized ${occupiedSlots.length} presets ✓`, 'ok');
+    } catch (e) {
+      toast('Initialization failed: ' + (e.message || e), 'err', 6000);
+      if (backups.size) {
+        status('Restoring the original presets…');
+        try {
+          for (const [s, p] of backups) {
+            if (p && p.data) {
+              await MF.writePreset(s, { name: p.name, category: p.category, p1: p.p1, data: p.data }, { timeoutMs: 4000 });
+            }
+          }
+          toast('Original presets restored ✓', 'ok');
+        } catch (e2) {
+          toast('WARNING: even the restore failed! (' + (e2.message || e2) + ')', 'err', 8000);
+        }
+      }
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }
+
+  function bytesEqual(u1, u2) {
+    if (!u1 || !u2 || u1.length !== u2.length) return false;
+    for (let i = 0; i < u1.length; i++) if (u1[i] !== u2[i]) return false;
+    return true;
+  }
+
+  async function confirmDeleteLibrarySelection() {
+    const ids = selIds();
+    if (!ids.length) return;
+    const ok = await showModal(
+      `Delete ${ids.length} presets from the library?`,
+      `<p>The presets will be removed from the library. Imported files are left untouched.</p>`,
+      { okLabel: 'Delete' }
+    );
+    if (!ok) return;
+    for (const id of ids) Library.remove(id);
+    state.selLib.clear();
+    state.selAnchor = null;
+    updateSelectionUI();
+  }
+
+  // ------------------------------------------------------------------ auto-scroll durante il drag
+
+  let dragScrollTimer = null;
+  function startDragScroll(kind) {
+    stopDragScroll();
+    state.dragInfo = { active: true, kind, x: 0, y: 0 };
+    dragScrollTimer = setInterval(() => {
+      const info = state.dragInfo;
+      if (!info || !info.active) {
+        stopDragScroll();
+        return;
+      }
+      // scrolla il contenitore sotto il cursore (slot list o libreria PC)
+      let container = null;
+      for (const c of [el.slotList, el.libGrid]) {
+        if (!c) continue;
+        const r = c.getBoundingClientRect();
+        if (info.x >= r.left && info.x <= r.right && info.y >= r.top && info.y <= r.bottom) {
+          container = c;
+          break;
+        }
+      }
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      const zone = 56;
+      let delta = 0;
+      if (info.y < rect.top + zone) delta = -(zone - (info.y - rect.top));
+      else if (info.y > rect.bottom - zone) delta = zone - (rect.bottom - info.y);
+      if (delta) container.scrollTop += delta * 0.6;
+    }, 35);
+  }
+  function stopDragScroll() {
+    if (dragScrollTimer) {
+      clearInterval(dragScrollTimer);
+      dragScrollTimer = null;
+    }
+    state.dragInfo = null;
+  }
+
+  async function readSlotToLibrary(slot) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    setBusy(true, `Reading slot ${slot}…`);
+    try {
+      const preset = await MF.readPreset(slot);
+      if (!preset.data) {
+        toast(`Slot ${slot} is empty (Init).`, 'err');
+        return;
+      }
+      if (isInitNamed(preset)) {
+        toast(`Slot ${slot} contains the Init preset: it is not added to the library.`, 'err');
+        return;
+      }
+      const collectionId = targetCollectionId();
+      Library.add(preset, { sourceName: `Device slot ${slot}`, collectionId });
+      const collName = collectionId ? Library.collectionName(collectionId) : '';
+      toast(`"${preset.name}" added to the library${collName ? ` "${collName}"` : ''} ✓`, 'ok');
+    } catch (e) {
+      toast('Read failed: ' + (e.message || e), 'err', 5000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function renameDeviceSlot(slot) {
+    const h = state.device ? state.device[slot - 1] : null;
+    if (!h || h.empty) return;
+    const cats = MF.CATEGORIES.map((c, i) =>
+      `<option value="${i}" ${h.category === i ? 'selected' : ''}>${esc(c)}</option>`).join('');
+    const ok = await showModal(
+      `Rename slot ${slot}`,
+      `<div class="field"><label>Name (max 14 characters)</label>
+         <input id="m-name" type="text" maxlength="14" value="${esc(h.name)}" /></div>
+       <div class="field"><label>Category</label><select id="m-cat">${cats}</select></div>
+       <p class="muted" style="font-size:12px">Renaming only updates the header on the device (the sound is untouched).</p>`,
+      { okLabel: 'Rename' }
+    );
+    if (!ok) return;
+    const name = $('m-name').value.trim();
+    const category = parseInt($('m-cat').value, 10);
+    setBusy(true, 'Renaming…');
+    try {
+      const updated = await MF.renamePreset(slot, { name, category });
+      if (state.device) {
+        state.device[slot - 1] = updated;
+        renderDevice();
+      }
+      toast(`Renamed slot ${slot} to "${updated.name}" ✓`, 'ok');
+    } catch (e) {
+      toast('Rename failed: ' + (e.message || e), 'err', 5000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ------------------------------------------------------------------ rendering libreria
+
+  /** Entries nella sola libreria attualmente selezionata (scope conteggi e filtri). */
+  function scopedEntries() {
+    const list = Library.all();
+    if (state.filterCollection === 'none') return list.filter((e) => !e.collectionId);
+    if (state.filterCollection !== 'all') {
+      const cid = parseInt(state.filterCollection, 10);
+      return list.filter((e) => e.collectionId === cid);
+    }
+    return list;
+  }
+
+  function filteredEntries() {
+    let list = scopedEntries();
+    list = list.filter((e) => !isInitNamed(e)); // gli Init non compaiono nella libreria
+    const q = state.search.trim().toLowerCase();
+    if (q) list = list.filter((e) => e.name.toLowerCase().includes(q));
+    // categoria (incluse le speciali: preferiti)
+    if (state.filterCategory === 'fav') {
+      list = list.filter((e) => !!e.favorite);
+    } else if (state.filterCategory !== 'all') {
+      const [kind, id] = state.filterCategory.split(':');
+      if (kind === 'cat') {
+        const idx = parseInt(id, 10);
+        list = list.filter((e) => e.category === idx);
+      }
+    }
+    if (state.filterCharacteristic) {
+      list = list.filter((e) => (e.characteristics || []).includes(state.filterCharacteristic));
+    }
+    if (state.sortMode === 'name') {
+      list = [...list].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+    } else if (state.sortMode === 'rating') {
+      list = [...list].sort((a, b) => (b.rating || 0) - (a.rating || 0) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+    } else if (state.sortMode === 'category') {
+      const key = (e) => (typeof e.category === 'number' ? e.category : -1);
+      list = [...list].sort((a, b) => key(a) - key(b) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+    }
+    return list;
+  }
+
+  /** True se la voce è un preset "Init" (da non contare nei filtri categoria). */
+  function isInitNamed(e) {
+    return (e && (e.name || '').trim().toLowerCase() === 'init');
+  }
+
+  function entryChips(e) {
+    const catIdx = typeof e.category === 'number' && e.category >= 0 ? e.category : -1;
+    const catLabel = catIdx >= 0 ? catName(catIdx) : '';
+    const catColorUsed = catColor(Math.max(0, catIdx));
+    const chars = (e.characteristics || []).map((c) => `<span class="char-chip on">${esc(c)}</span>`).join('');
+    return { catLabel, catColorUsed, chars };
+  }
+
+  /** Rendering delle 5 stelle; `interactive` abilita il click per impostare la valutazione. */
+  function ratingStarsHtml(rating, { interactive = false, id = null, cls = '' } = {}) {
+    const r = rating || 0;
+    let s = `<span class="rating-stars ${cls}" ${interactive ? `data-rating="${id}"` : ''} title="${r ? `${r}/5` : 'Rating'}">`;
+    for (let k = 1; k <= 5; k++) {
+      s += `<span class="star ${k <= r ? 'on' : ''}" ${interactive ? `data-star="${k}"` : ''}>★</span>`;
+    }
+    s += `</span>`;
+    return s;
+  }
+
+  function bindRating(root) {
+    root.querySelectorAll('.rating-stars[data-rating]').forEach((wrap) => {
+      const id = parseInt(wrap.dataset.rating, 10);
+      const cur = Library.get(id);
+      const stars = Array.from(wrap.querySelectorAll('.star'));
+      const clearHover = () => stars.forEach((s) => s.classList.remove('hover-on'));
+      stars.forEach((star) => {
+        star.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const k = parseInt(star.dataset.star, 10);
+          Library.setRating(id, cur && cur.rating === k ? 0 : k);
+          renderLibrary();
+          if (state.selLib.size === 1 && state.selLib.has(id)) showLibraryDetail(id);
+        });
+        star.addEventListener('mouseenter', () => {
+          clearHover();
+          const k = parseInt(star.dataset.star, 10);
+          stars.slice(0, k).forEach((s) => s.classList.add('hover-on'));
+        });
+      });
+      wrap.addEventListener('mouseleave', clearHover);
+    });
+  }
+
+  function bindCard(card, id) {
+    const isList = () => el.libGrid.classList.contains('lib-list-view');
+    card.addEventListener('click', (e) => {
+      if (e.target.closest('button') || e.target.closest('.fav') || e.target.closest('.rating-stars')) return;
+      handleCardSelect(e, id);
+    });
+    card.addEventListener('dragstart', (e) => {
+      // il preset afferrato diventa il preset attivo (se non era selezionato)
+      if (!state.selLib.has(id)) {
+        state.selLib = new Set([id]);
+        state.selAnchor = id;
+        syncLibSelectionVisuals();
+        renderSelBar();
+      }
+      state.dragEntryId = id;
+      // se la scheda fa parte di una selezione multipla, trascina l'intero blocco
+      state.dragBlockIds = state.selLib.has(id) && state.selLib.size > 1 ? selIds() : null;
+      e.dataTransfer.setData('application/x-managefreak', String(id));
+      e.dataTransfer.setData('text/plain', String(id));
+      e.dataTransfer.effectAllowed = 'copyMove';
+      card.classList.add('dragging');
+      startDragScroll('pc');
+    });
+    card.addEventListener('dragend', () => {
+      card.classList.remove('dragging');
+      state.dragEntryId = null;
+      state.dragBlockIds = null;
+      stopDragScroll();
+    });
+    // riordino: rilascia su un'altra scheda
+    card.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer.types.includes('application/x-managefreak')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const rect = card.getBoundingClientRect();
+      const before = isList()
+        ? e.clientY < rect.top + rect.height / 2
+        : e.clientX < rect.left + rect.width / 2;
+      card.classList.toggle('drop-before', before && isList());
+      card.classList.toggle('drop-after', !before && isList());
+      card.classList.toggle('drop-left', before && !isList());
+      card.classList.toggle('drop-right', !before && !isList());
+    });
+    card.addEventListener('dragleave', () => {
+      card.classList.remove('drop-before', 'drop-after', 'drop-left', 'drop-right');
+    });
+    card.addEventListener('drop', (e) => {
+      e.preventDefault();
+      card.classList.remove('drop-before', 'drop-after', 'drop-left', 'drop-right');
+      const srcId = parseInt(e.dataTransfer.getData('application/x-managefreak'), 10);
+      if (!srcId || srcId === id) return;
+      const rect = card.getBoundingClientRect();
+      const after = isList()
+        ? e.clientY >= rect.top + rect.height / 2
+        : e.clientX >= rect.left + rect.width / 2;
+      if (state.dragBlockIds && state.dragBlockIds.length > 1) {
+        Library.moveBlock(state.dragBlockIds, id, after);
+      } else {
+        Library.move(srcId, id, after);
+      }
+    });
+    card.querySelectorAll('[data-act]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const act = btn.dataset.act;
+        const entry = Library.get(id);
+        if (!entry) return;
+        if (act === 'fav') Library.toggleFavorite(id);
+        else if (act === 'write') writeToSlotWithDialog(entry);
+        else if (act === 'export') exportEntry(entry);
+        else if (act === 'delete') {
+          Library.remove(id);
+          state.selLib.delete(id);
+          renderLibrary();
+          syncDetailToSelection();
+        }
+      });
+    });
+  }
+
+  // ------------------------------------------------------------------ multi-selezione
+
+  function selIds() {
+    return Array.from(state.selLib);
+  }
+
+  function handleCardSelect(e, id) {
+    state.activePane = 'library';
+    const ctrl = e.ctrlKey || e.metaKey;
+    const shift = e.shiftKey;
+    if (ctrl) {
+      if (state.selLib.has(id)) state.selLib.delete(id);
+      else {
+        state.selLib.add(id);
+        state.selAnchor = id;
+      }
+    } else if (shift) {
+      const order = filteredEntries().map((x) => x.id);
+      const anchorId = state.selAnchor !== null && state.selLib.has(state.selAnchor) ? state.selAnchor : id;
+      const from = order.indexOf(anchorId);
+      const to = order.indexOf(id);
+      if (from >= 0 && to >= 0) {
+        const [a, b] = from < to ? [from, to] : [to, from];
+        state.selLib.clear();
+        for (let i = a; i <= b; i++) state.selLib.add(order[i]);
+      } else {
+        state.selLib.clear();
+        state.selLib.add(id);
+        state.selAnchor = id;
+      }
+    } else {
+      state.selLib.clear();
+      state.selLib.add(id);
+      state.selAnchor = id;
+    }
+    updateSelectionUI();
+  }
+
+  function clearSelection() {
+    state.selLib.clear();
+    state.selAnchor = null;
+    updateSelectionUI();
+  }
+
+  /** Aggiorna solo la classe "selected" delle card/righe (senza re-render). */
+  function syncLibSelectionVisuals() {
+    document.querySelectorAll('#lib-grid .lib-card, #lib-grid .lib-row').forEach((node) => {
+      const nid = parseInt(node.dataset.id, 10);
+      node.classList.toggle('selected', state.selLib.has(nid));
+    });
+  }
+
+  function syncDeviceSelectionVisuals() {
+    document.querySelectorAll('#slot-list .slot-row').forEach((node) => {
+      const nslot = parseInt(node.dataset.slot, 10);
+      node.classList.toggle('selected', state.selectedDeviceSlots.has(nslot));
+    });
+  }
+
+  // ------------------------------------------------------------------ navigazione con le frecce
+
+  function navigateLibrary(key) {
+    const order = filteredEntries().map((x) => x.id);
+    if (!order.length) return;
+    let idx = order.indexOf(state.selAnchor !== null && state.selLib.has(state.selAnchor) ? state.selAnchor : (selIds()[0] ?? order[0]));
+    if (idx < 0) idx = 0;
+    if (key === 'ArrowDown' || key === 'ArrowRight') idx = Math.min(order.length - 1, idx + 1);
+    else if (key === 'ArrowUp' || key === 'ArrowLeft') idx = Math.max(0, idx - 1);
+    state.selLib = new Set([order[idx]]);
+    state.selAnchor = order[idx];
+    updateSelectionUI();
+    const card = el.libGrid.querySelector(`[data-id="${order[idx]}"]`);
+    if (card) card.scrollIntoView({ block: 'nearest' });
+  }
+
+  function navigateDevice(key) {
+    if (!state.device) return;
+    const cur = state.devSelAnchor !== null && state.selectedDeviceSlots.has(state.devSelAnchor)
+      ? state.devSelAnchor
+      : (deviceSelIds()[0] ?? 1);
+    let slot = cur;
+    if (key === 'ArrowDown' || key === 'ArrowRight') slot = Math.min(512, slot + 1);
+    else if (key === 'ArrowUp' || key === 'ArrowLeft') slot = Math.max(1, slot - 1);
+    state.selectedDeviceSlots = new Set([slot]);
+    state.devSelAnchor = slot;
+    renderDevice();
+    renderDeviceSelBar();
+    showDeviceDetail(slot);
+    const row = el.slotList.querySelector(`.slot-row[data-slot="${slot}"]`);
+    if (row) row.scrollIntoView({ block: 'nearest' });
+  }
+
+  /** Aggiorna griglia, barra di selezione e pannello dettagli. */
+  function updateSelectionUI() {
+    renderLibrary();
+    renderSelBar();
+    syncDetailToSelection();
+  }
+
+  function syncDetailToSelection() {
+    const ids = selIds();
+    if (!ids.length) showDetailEmpty();
+    else if (ids.length === 1) showLibraryDetail(ids[0]);
+    else showMultiDetail(ids);
+  }
+
+  function renderSelBar() {
+    // barra sticky rimossa: le azioni di gruppo sono nel pannello dettagli
+  }
+
+  /** Azioni di gruppo sulla selezione multipla della libreria. */
+  async function runBatchAction(act) {
+    const ids = selIds();
+    if (!ids.length) return;
+    if (act === 'clear') return clearSelection();
+    if (act === 'delete') {
+      const ok = await showModal(
+        `Delete ${ids.length} presets from the library?`,
+        `<p>The presets will be removed from the library. Imported files are left untouched.</p>`,
+        { okLabel: 'Delete' }
+      );
+      if (!ok) return;
+      for (const id of ids) Library.remove(id);
+      state.selLib.clear();
+      state.selAnchor = null;
+      updateSelectionUI();
+    } else if (act === 'move') {
+      const collections = Library.allCollections();
+      const opts = collections.map((c) =>
+        `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+      const ok = await showModal(
+        `Move ${ids.length} presets to…`,
+        `<div class="field"><label>Destination library</label>
+           <select id="m-coll">
+             <option value="">— No library (general collection) —</option>
+             ${opts}
+           </select></div>
+         <div class="field"><input id="m-newcoll" type="text" placeholder="…or a name for a new library" /></div>`,
+        { okLabel: 'Move' }
+      );
+      if (!ok) return;
+      let collectionId = null;
+      const newName = $('m-newcoll').value.trim();
+      if (newName) collectionId = Library.addCollection(newName);
+      else collectionId = $('m-coll').value ? parseInt($('m-coll').value, 10) : null;
+      for (const id of ids) Library.moveEntryToCollection(id, collectionId);
+      state.filterCollection = collectionId === null ? 'none' : String(collectionId);
+      toast(`Moved ${ids.length} presets ✓`, 'ok');
+      updateSelectionUI();
+    } else if (act === 'fav') {
+      const allFav = ids.every((id) => {
+        const e = Library.get(id);
+        return e && !!e.favorite;
+      });
+      for (const id of ids) {
+        const e = Library.get(id);
+        if (!e) continue;
+        if ((allFav && e.favorite) || (!allFav && !e.favorite)) Library.toggleFavorite(id);
+      }
+      updateSelectionUI();
+    } else if (act === 'export') {
+      const files = [];
+      for (const id of ids) {
+        const entry = Library.get(id);
+        if (!entry || !entry.data) continue;
+        const preset = {
+          name: entry.name,
+          category: typeof entry.category === 'number' && entry.category >= 0 ? entry.category : 0,
+          init: 0,
+          p1: entry.p1 || 0,
+          data: entry.data,
+          characteristics: entry.characteristics || [],
+        };
+        const bytes = Mfp.serializeMfp(preset);
+        const safe = (entry.name || 'preset').replace(/[\\/:*?"<>|]/g, '_');
+        files.push({ name: `${safe}.mfp`, dataB64: Mfp.bytesToB64(bytes) });
+      }
+      if (!files.length) return toast('No exportable presets.', 'err');
+      const dir = await window.mfapi.exportFolder(files);
+      if (dir) toast(`Exported ${files.length} presets to ${dir}`, 'ok');
+    }
+  }
+
+  function showMultiDetail(ids) {
+    const entries = ids.map((id) => Library.get(id)).filter(Boolean);
+    const cats = new Set();
+    const libs = new Set();
+    for (const e of entries) {
+      const ci = typeof e.category === 'number' && e.category >= 0 ? e.category : -1;
+      if (ci >= 0) cats.add(catName(ci));
+      const custom = e.category && String(e.category).startsWith('custom:')
+        ? Library.allCategories().find((c) => c.id === parseInt(String(e.category).split(':')[1], 10))
+        : null;
+      if (custom) cats.add(custom.name);
+      if (e.collectionId) libs.add(Library.collectionName(e.collectionId));
+      else libs.add('(no library)');
+    }
+    renderDetail({
+      name: `${entries.length} presets selected`,
+      metaRows: [
+        ['Categories', Array.from(cats).join(', ') || '—'],
+        ['Libraries', Array.from(libs).join(', ') || '—'],
+      ],
+      tags: [],
+      tagInput: null,
+      actions: [
+        { id: 'move', label: '⇥ Move to…', run: () => runBatchAction('move') },
+        { id: 'fav', label: '★ Favorites', run: () => runBatchAction('fav') },
+        { id: 'export', label: '⭳ Export .mfp', run: () => runBatchAction('export') },
+        { id: 'delete', label: 'Delete', run: () => runBatchAction('delete') },
+        { id: 'clear', label: 'Deselect', run: () => runBatchAction('clear') },
+      ],
+      params: [],
+    });
+  }
+
+  function renderLibrary() {
+    const entries = filteredEntries();
+    el.libraryCount.textContent = entries.length ? `(${entries.length} presets)` : '';
+    // the title shows the name of the selected library
+    let title = 'All libraries';
+    if (state.filterCollection === 'none') title = 'No library';
+    else if (state.filterCollection !== 'all') title = Library.collectionName(parseInt(state.filterCollection, 10)) || 'Library';
+    const titleEl = document.getElementById('library-title');
+    if (titleEl) titleEl.textContent = title;
+    el.btnViewToggle = el.btnViewToggle || document.getElementById('btn-view-toggle');
+    if (el.btnViewToggle) {
+      el.btnViewToggle.textContent = state.libView === 'grid' ? '☰' : '▦';
+      el.btnViewToggle.title = state.libView === 'grid' ? 'Switch to list view' : 'Switch to grid view';
+    }
+    el.libGrid.classList.toggle('lib-list-view', state.libView === 'list');
+
+    if (!entries.length) {
+      el.libGrid.innerHTML = `<div class="view-header"><div class="hint">No presets match the filters.
+        Read presets from the device or import .mfp/.mfpz/.mfprojz files exported from Arturia MIDI Control Center.</div></div>`;
+      renderSidebar();
+      return;
+    }
+
+    // bank index for presets without a slot number (re-indexing)
+    const bankOrder = scopedEntries().map((x) => x.id);
+
+    const html = entries.map((e) => {
+      const { catLabel, catColorUsed, chars } = entryChips(e);
+      const collName = e.collectionId ? Library.collectionName(e.collectionId) : '';
+      const selected = state.selLib.has(e.id) ? 'selected' : '';
+      // numero = posizione nella bank corrente (sempre aggiornata)
+      const num = bankOrder.indexOf(e.id) + 1;
+      if (state.libView === 'list') {
+        return `
+        <div class="lib-row ${selected}" data-id="${e.id}" draggable="true">
+          <span class="row-grip" title="Drag to reorder">⠿</span>
+          <span class="fav ${e.favorite ? 'on' : ''}" data-act="fav" title="Favorite">★</span>
+          <span class="row-rating">${ratingStarsHtml(e.rating, { interactive: true, id: e.id })}</span>
+          <span class="row-name" title="${esc(e.name)}">${esc(e.name)}</span>
+          <span class="row-cat">${catLabel ? `<span class="chip" style="border-color:${catColorUsed}">${esc(catLabel)}</span>` : ''}</span>
+          <span class="row-tags">${chars}</span>
+          <span class="row-coll">${collName ? esc(collName) : ''}</span>
+          <span class="row-actions">
+            <button class="btn small" data-act="write" title="Send to MicroFreak">➡</button>
+            <button class="btn small" data-act="export" title="Export .mfp">⭳</button>
+            <button class="btn small" data-act="delete" title="Remove from library">Delete</button>
+          </span>
+        </div>`;
+      }
+      return `
+        <div class="lib-card ${selected}" data-id="${e.id}" draggable="true">
+          <div class="card-head">
+            <p class="card-name">${esc(e.name)}</p>
+            <span class="fav ${e.favorite ? 'on' : ''}" data-act="fav" title="Favorite">★</span>
+          </div>
+          <div class="card-rating">${ratingStarsHtml(e.rating, { interactive: true, id: e.id })}</div>
+          <div class="card-tags">
+            ${catLabel ? `<span class="chip" style="border-color:${catColorUsed}">${esc(catLabel)}</span>` : ''}
+          </div>
+          ${chars ? `<div class="char-chips">${chars}</div>` : ''}
+          <span class="card-slotnum">${num}</span>
+          <div class="card-actions">
+            <button class="btn small" data-act="write" title="Send to MicroFreak">➡ Send</button>
+            <button class="btn small" data-act="export" title="Export .mfp">⭳ .mfp</button>
+            <button class="btn small" data-act="delete" title="Remove from library">Delete</button>
+          </div>
+        </div>`;
+    }).join('');
+
+    el.libGrid.innerHTML = html;
+    entries.forEach((e) => {
+      const card = el.libGrid.querySelector(`[data-id="${e.id}"]`);
+      if (card) bindCard(card, e.id);
+    });
+    bindRating(el.libGrid);
+    renderSidebar();
+  }
+
+  function renderSidebar() {
+    const all = Library.all();
+    // entries nello scope della libreria selezionata → conteggi categorie coerenti
+    const scoped = scopedEntries();
+    const scopedNoInit = scoped.filter((e) => !isInitNamed(e));
+
+    // ---- Imported libraries (no dots, counts right-aligned)
+    let libHtml = `<div class="cat-item ${state.filterCollection === 'all' ? 'active' : ''}" data-coll="all">
+      <span class="coll-name">All libraries</span>
+      <span class="cat-count">${all.length}</span></div>`;
+    for (const c of Library.allCollections()) {
+      const n = all.filter((e) => e.collectionId === c.id).length;
+      libHtml += `<div class="cat-item ${state.filterCollection === String(c.id) ? 'active' : ''}" data-coll="${c.id}">
+        <span class="coll-name">${esc(c.name)}</span>
+        <span class="coll-x" data-del="${c.id}" title="Delete library (presets stay)">✕</span>
+        <span class="cat-count">${n}</span></div>`;
+    }
+    const noneCount = all.filter((e) => !e.collectionId).length;
+    libHtml += `<div class="cat-item ${state.filterCollection === 'none' ? 'active' : ''}" data-coll="none">
+      <span class="coll-name">No library</span> <span class="cat-count">${noneCount}</span></div>`;
+    libHtml += `<div class="cat-item" data-coll="new" style="color:var(--muted)"><span class="coll-name">＋ New library…</span></div>`;
+    el.libList = el.libList || document.getElementById('lib-list');
+    el.libList.innerHTML = libHtml;
+    el.libList.querySelectorAll('.coll-x').forEach((x) => {
+      x.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const cid = parseInt(x.dataset.del, 10);
+        const c = Library.allCollections().find((cc) => cc.id === cid);
+        const ok = await showModal(
+          `Delete the library "${esc(c ? c.name : '')}"?`,
+          `<p>The presets it contains will <strong>not</strong> be deleted: they go back to the general collection.</p>`,
+          { okLabel: 'Delete' }
+        );
+        if (ok) {
+          Library.removeCollection(cid);
+          if (state.filterCollection === String(cid)) state.filterCollection = 'all';
+          renderLibrary();
+        }
+      });
+    });
+    el.libList.querySelectorAll('.cat-item').forEach((item) => {
+      item.addEventListener('click', async () => {
+        const coll = item.dataset.coll;
+        if (coll === 'new') {
+          const ok = await showModal('New library',
+            `<p>Libraries keep your imported presets organized
+             (e.g. an Arturia pack, a personal collection…).</p>
+             <div class="field"><label>Name</label><input id="m-cname" type="text" placeholder="e.g. Pack 2024" /></div>`,
+            { okLabel: 'Create' });
+          if (ok) {
+            const name = $('m-cname').value.trim();
+            if (name) {
+              const id = Library.addCollection(name);
+              state.filterCollection = String(id);
+              renderLibrary();
+            }
+          }
+          return;
+        }
+        state.filterCollection = coll;
+        renderSidebar();
+        renderLibrary();
+      });
+    });
+
+    // ---- Stock categories + Favorites (no custom categories; Init presets don't count)
+    let html = `<div class="cat-item ${state.filterCategory === 'all' ? 'active' : ''}" data-cat="all">
+      <span class="cat-dot" style="background:#8d8aa0"></span> All
+      <span class="cat-count">${scopedNoInit.length}</span></div>`;
+    const favCount = scopedNoInit.filter((e) => e.favorite).length;
+    html += `<div class="cat-item fav-item ${state.filterCategory === 'fav' ? 'active' : ''}" data-cat="fav">
+      <span class="cat-dot" style="background:var(--yellow)"></span> ★ Favorites
+      <span class="cat-count">${favCount}</span></div>`;
+    MF.CATEGORIES.forEach((c, i) => {
+      const n = scopedNoInit.filter((e) => e.category === i).length;
+      html += `<div class="cat-item ${state.filterCategory === `cat:${i}` ? 'active' : ''}" data-cat="cat:${i}">
+        <span class="cat-dot" style="background:${catColor(i)}"></span> ${esc(c)}
+        <span class="cat-count">${n}</span></div>`;
+    });
+    el.catList.innerHTML = html;
+    el.catList.querySelectorAll('.cat-item').forEach((item) => {
+      item.addEventListener('click', () => {
+        state.filterCategory = item.dataset.cat;
+        renderSidebar();
+        renderLibrary();
+      });
+    });
+
+    // ---- Tag (rimossi) — sezione caratteristiche subito sotto le categorie
+    // ---- Caratteristiche Arturia
+    el.charList.innerHTML = CHARACTERISTICS.map((c) => {
+      const n = all.filter((e) => (e.characteristics || []).includes(c)).length;
+      return `<div class="char-item ${state.filterCharacteristic === c ? 'active' : ''}" data-char="${esc(c)}">
+        <span class="char-dot"></span> ${esc(c)}
+        <span class="char-count">${n}</span></div>`;
+    }).join('');
+    el.charList.querySelectorAll('.char-item').forEach((item) => {
+      item.addEventListener('click', () => {
+        state.filterCharacteristic = state.filterCharacteristic === item.dataset.char ? null : item.dataset.char;
+        renderLibrary();
+      });
+    });
+  }
+
+  // ------------------------------------------------------------------ dettagli
+
+  function showDetailEmpty() {
+    el.detailEmpty.classList.remove('hidden');
+    el.detail.classList.add('hidden');
+  }
+
+  function renderDetail({ name, metaRows, tags, tagInput, notes, actions, params, onRemoveTag, extraHtml, onRename }) {
+    el.detailEmpty.classList.add('hidden');
+    el.detail.classList.remove('hidden');
+    el.detailName.innerHTML = '';
+    el.detailName.appendChild(document.createTextNode(name));
+    if (onRename) {
+      const btn = document.createElement('button');
+      btn.className = 'btn small name-edit-btn';
+      btn.textContent = '✎';
+      btn.title = 'Rename';
+      btn.addEventListener('click', () => {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'name-edit-input';
+        input.maxLength = 14;
+        input.value = name;
+        el.detailName.innerHTML = '';
+        el.detailName.appendChild(input);
+        input.focus();
+        input.select();
+        const finish = (save) => {
+          if (save && input.value.trim() && input.value.trim() !== name) {
+            onRename(input.value.trim());
+          } else {
+            el.detailName.innerHTML = '';
+            el.detailName.appendChild(document.createTextNode(name));
+          }
+        };
+        input.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') finish(true);
+          else if (ev.key === 'Escape') finish(false);
+        });
+        input.addEventListener('blur', () => finish(true));
+      });
+      const wrap = document.createElement('span');
+      wrap.className = 'name-edit-wrap';
+      wrap.appendChild(btn);
+      el.detailName.appendChild(wrap);
+    }
+    el.detailMeta.innerHTML = metaRows.map(([k, v]) =>
+      `<div><strong>${esc(k)}:</strong> ${esc(v)}</div>`).join('');
+    if (extraHtml) {
+      const box = document.createElement('div');
+      box.className = 'detail-extra';
+      box.innerHTML = extraHtml;
+      el.detailMeta.appendChild(box);
+    }
+    el.detailTags.innerHTML = tags.map((t) =>
+      `<span class="tag">${esc(t)} <span class="x" data-tag="${esc(t)}">✕</span></span>`).join('');
+    if (onRemoveTag) {
+      el.detailTags.querySelectorAll('.x').forEach((x) => {
+        x.addEventListener('click', () => onRemoveTag(x.dataset.tag));
+      });
+    }
+    el.detailAddTag.classList.toggle('hidden', !tagInput);
+    if (tagInput) {
+      el.detailAddTag.value = '';
+      el.detailAddTag.onkeydown = (e) => {
+        if (e.key === 'Enter' && el.detailAddTag.value.trim()) {
+          tagInput.onAdd(el.detailAddTag.value.trim());
+          el.detailAddTag.value = '';
+        }
+      };
+    }
+    el.detailNotesBox.classList.add('hidden'); // campo note rimosso
+    el.detailActions.innerHTML = actions.map((a) =>
+      `<button class="btn small" data-action="${a.id}">${esc(a.label)}</button>`).join('');
+    el.detailActions.querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => actions.find((a) => a.id === b.dataset.action).run());
+    });
+    el.detailParams.innerHTML = params.length
+      ? params.map((p) => `<div class="param-row"><span class="plabel">${esc(p.label)}</span><span class="pvalue">${esc(p.value)}</span></div>`).join('')
+      : '<div class="muted" style="font-size:12px">Preset body not available.</div>';
+  }
+
+  function showDeviceDetail(slot) {
+    const h = state.device ? state.device[slot - 1] : null;
+    if (!h) return showDetailEmpty();
+    const isInit = h && !h.error && !h.empty && (h.name || '').trim() === 'Init';
+    renderDetail({
+      name: h.name || `Slot ${slot}`,
+      metaRows: [
+        ['Slot', String(slot)],
+        ['Status', !h ? 'Unread' : h.error ? 'Error' : (h.empty ? 'Empty (Init)' : (isInit ? 'Init preset' : 'Occupied'))],
+        ['Category', h.category >= 0 ? catName(h.category) : '—'],
+      ],
+      tags: [],
+      tagInput: null,
+      actions: [
+        { id: 'play', label: '▶ Select on synth', run: () => MF.selectPreset(slot) },
+        ...(h.empty || h.error ? [] : [{ id: 'read', label: '⬅ Import to library', run: () => readSlotToLibrary(slot) }]),
+        ...(h.empty || h.error ? [] : [{ id: 'init', label: 'Delete (Init)', run: () => initDeviceSlots([slot]) }]),
+      ],
+      params: [],
+      onRename: (h.empty || h.error) ? null : async (newName) => {
+        setBusy(true, 'Renaming…');
+        try {
+          const updated = await MF.renamePreset(slot, { name: newName });
+          if (state.device) {
+            state.device[slot - 1] = updated;
+            renderDevice();
+          }
+          toast(`Renamed slot ${slot} to "${updated.name}" ✓`, 'ok');
+        } catch (e) {
+          toast('Rename failed: ' + (e.message || e), 'err', 5000);
+        } finally {
+          setBusy(false);
+        }
+      },
+    });
+  }
+
+  function showLibraryDetail(id) {
+    const entry = Library.get(id);
+    if (!entry) return showDetailEmpty();
+    const catIdx = typeof entry.category === 'number' && entry.category >= 0 ? entry.category : -1;
+    const customCat = entry.category && String(entry.category).startsWith('custom:')
+      ? Library.allCategories().find((c) => c.id === parseInt(String(entry.category).split(':')[1], 10))
+      : null;
+    const catLabel = customCat ? customCat.name : (catIdx >= 0 ? catName(catIdx) : '—');
+    const params = entry.data ? Params.describe(entry.data).rows : [];
+    const tags = entry.tags || [];
+    const collName = entry.collectionId ? Library.collectionName(entry.collectionId) : '—';
+    const collOpts = [
+      `<option value="">— No library —</option>`,
+      ...Library.allCollections().map((c) =>
+        `<option value="${c.id}" ${entry.collectionId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`),
+    ].join('');
+    const catOpts = [
+      `<option value="-1">— none —</option>`,
+      ...MF.CATEGORIES.map((c, i) =>
+        `<option value="${i}" ${catIdx === i ? 'selected' : ''}>${esc(c)}</option>`),
+    ].join('');
+    const charChips = CHARACTERISTICS.map((c) => {
+      const on = (entry.characteristics || []).includes(c);
+      return `<span class="char-chip ${on ? 'on' : ''}" data-char="${esc(c)}">${esc(c)}</span>`;
+    }).join('');
+    const extraHtml = `
+      <div class="detail-coll">
+        <label for="detail-coll-sel">Library</label>
+        <select id="detail-coll-sel">${collOpts}</select>
+      </div>
+      <div class="detail-coll">
+        <label for="detail-cat-sel">Category</label>
+        <select id="detail-cat-sel">${catOpts}</select>
+      </div>
+      <div class="detail-coll">
+        <label>Rating</label>
+        <div id="detail-rating">${ratingStarsHtml(entry.rating || 0, { interactive: true, id })}</div>
+      </div>
+      <div class="detail-coll">
+        <label>Characteristics</label>
+        <div class="char-chips" id="detail-chars">${charChips}</div>
+      </div>`;
+    renderDetail({
+      name: entry.name,
+      metaRows: [
+        ['Category', catLabel],
+        ['Source', entry.sourceName || (entry.sourceSlot ? `Device slot ${entry.sourceSlot}` : '—')],
+        ['Added', new Date(entry.addedAt).toLocaleString()],
+      ],
+      tags: [],
+      tagInput: null,
+      actions: [
+        { id: 'export', label: '⭳ Export .mfp', run: () => exportEntry(entry) },
+        { id: 'exportz', label: '⭳ Export .mfpz', run: () => exportEntry(entry, true) },
+        { id: 'delete', label: 'Delete', run: () => { Library.remove(id); showDetailEmpty(); renderLibrary(); } },
+      ],
+      params,
+      extraHtml,
+      onRename: (newName) => {
+        Library.update(id, { name: newName });
+        renderLibrary();
+        showLibraryDetail(id);
+      },
+    });
+    const sel = document.getElementById('detail-coll-sel');
+    if (sel) {
+      sel.addEventListener('change', () => {
+        Library.moveEntryToCollection(id, sel.value ? parseInt(sel.value, 10) : null);
+        showLibraryDetail(id);
+      });
+    }
+    const catSel = document.getElementById('detail-cat-sel');
+    if (catSel) {
+      catSel.addEventListener('change', () => {
+        const v = catSel.value;
+        const cat = v === '-1' ? -1 : parseInt(v, 10);
+        Library.update(id, { category: cat });
+        showLibraryDetail(id);
+      });
+    }
+    const charBox = document.getElementById('detail-chars');
+    if (charBox) {
+      charBox.querySelectorAll('.char-chip').forEach((chip) => {
+        chip.addEventListener('click', () => {
+          Library.toggleCharacteristic(id, chip.dataset.char);
+          showLibraryDetail(id);
+        });
+      });
+    }
+    bindRating(el.detail);
+  }
+
+  async function renameLibraryEntry(id) {
+    const entry = Library.get(id);
+    if (!entry) return;
+    const cats = MF.CATEGORIES.map((c, i) =>
+      `<option value="${i}" ${entry.category === i ? 'selected' : ''}>${esc(c)}</option>`).join('');
+    const ok = await showModal(
+      'Edit preset in library',
+      `<div class="field"><label>Name</label><input id="m-name" type="text" maxlength="14" value="${esc(entry.name)}" /></div>
+       <div class="field"><label>Category</label><select id="m-cat">
+         <option value="-1">— none —</option>${cats}
+       </select></div>`,
+      { okLabel: 'Save' }
+    );
+    if (!ok) return;
+    const name = $('m-name').value.trim();
+    const cat = $('m-cat').value;
+    Library.update(id, { name, category: cat === '-1' ? -1 : parseInt(cat, 10) });
+    renderLibrary();
+    showLibraryDetail(id);
+  }
+
+  // ------------------------------------------------------------------ import / export
+
+  async function importFiles() {
+    const files = await window.mfapi.openFiles({
+      filters: [
+        { name: 'MicroFreak preset / MCC', extensions: ['mfp', 'mbp', 'mfpz', 'mfprojz', 'syx', 'zip', 'json'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (!files || !files.length) return;
+
+    // 1. parse everything (JSON backups are restored separately)
+    const parsed = [];
+    const errors = [];
+    let restoredBackups = 0;
+    for (const f of files) {
+      const bytes = Mfp.b64ToBytes(f.data);
+      const ext = f.name.split('.').pop().toLowerCase();
+      try {
+        if (ext === 'json') {
+          const json = JSON.parse(Mfp.bytesToText(bytes));
+          if (!json || !Array.isArray(json.entries)) throw new Error('Unrecognized JSON');
+          const collMap = new Map();
+          for (const c of (json.collections || [])) {
+            if (typeof c.id === 'number') collMap.set(c.id, Library.addCollection(c.name));
+          }
+          for (const e of json.entries) {
+            if (!e.dataB64 && !e.rawHeaderB64) continue;
+            const raw = { ...e };
+            if (raw.collectionId != null && collMap.has(raw.collectionId)) {
+              raw.collectionId = collMap.get(raw.collectionId);
+            } else {
+              raw.collectionId = null;
+            }
+            Library.importRaw(raw);
+            restoredBackups++;
+          }
+        } else if (ext === 'mfp' || ext === 'mbp') {
+          parsed.push({ kind: 'preset', value: Mfp.parseMfp(bytes), sourceName: f.name });
+        } else if (ext === 'zip') {
+          try {
+            parsed.push({ kind: 'preset', value: await Mfp.parseMfpz(bytes), sourceName: f.name });
+          } catch {
+            parsed.push({ kind: 'preset', value: Mfp.parseMfp(bytes), sourceName: f.name });
+          }
+        } else if (ext === 'mfpz') {
+          parsed.push({ kind: 'preset', value: await Mfp.parseMfpz(bytes), sourceName: f.name });
+        } else if (ext === 'mfprojz') {
+          for (const p of await Mfp.parseMfprojz(bytes)) {
+            parsed.push({ kind: 'preset', value: p, sourceName: f.name });
+          }
+        } else if (ext === 'syx') {
+          parsed.push({ kind: 'preset', value: Mfp.parseSyx(bytes), sourceName: f.name });
+        } else {
+          throw new Error('Unsupported extension: .' + ext);
+        }
+      } catch (e) {
+        errors.push(`${f.name}: ${e.message || e}`);
+      }
+    }
+
+    if (!parsed.length) {
+      if (restoredBackups) {
+        toast(`Backup restored: ${restoredBackups} presets ✓`, 'ok');
+        renderLibrary();
+      } else {
+        toast('No importable presets in the chosen files. ' + errors.join(' — '), 'err', 7000);
+      }
+      return;
+    }
+
+    // filtra i preset Init vuoti (slot vuoti dei progetti MCC)
+    const isInitPreset = (p) => p.value.init === 1 || !p.value.data || p.value.data.length === 0 || isInitNamed(p.value);
+    const importable = parsed.filter((p) => !isInitPreset(p));
+    const skippedInit = parsed.length - importable.length;
+    if (!importable.length) {
+      toast(`No presets imported: all ${parsed.length} presets are empty Init slots.`, 'ok');
+      return;
+    }
+
+    // 2. scegli la libreria di destinazione
+    const collections = Library.allCollections();
+    const opts = collections.map((c) =>
+      `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+    const cur = state.filterCollection !== 'all' && state.filterCollection !== 'none'
+      ? state.filterCollection : '';
+    const ok = await showModal(
+      `Import ${importable.length} presets${skippedInit ? ` (${skippedInit} empty Init slots skipped)` : ''}`,
+      `<p>Which library should the presets be imported into?</p>
+       <div class="field"><label>Destination library</label>
+         <select id="m-coll">
+           <option value="" ${cur === '' ? 'selected' : ''}>— No library (general collection) —</option>
+           ${opts}
+         </select></div>
+       <div class="field" style="display:flex;gap:8px;align-items:center">
+         <input id="m-newcoll" type="text" placeholder="…or type a name for a new library" />
+       </div>`,
+      {
+        okLabel: 'Import',
+        onOk: () => {
+          if ($('m-newcoll').value.trim()) return true;
+          return true;
+        },
+      }
+    );
+    if (!ok) return;
+
+    let collectionId = null;
+    const newName = $('m-newcoll').value.trim();
+    if (newName) {
+      collectionId = Library.addCollection(newName);
+    } else {
+      collectionId = $('m-coll').value ? parseInt($('m-coll').value, 10) : null;
+    }
+
+    // 3. inserisci
+    let added = 0;
+    for (const p of importable) {
+      if (p.kind === 'raw') Library.importRaw(p.value);
+      else Library.add(p.value, { sourceName: p.sourceName, collectionId });
+      added++;
+    }
+    state.filterCollection = collectionId === null ? 'all' : String(collectionId);
+    state.filterCategory = 'all';
+    state.filterTag = null;
+    toast(`Imported ${added} presets ✓` + (skippedInit ? ` — ${skippedInit} empty Init slots skipped` : ''), 'ok');
+    if (errors.length) toast('Some files were not imported: ' + errors.join(' — '), 'err', 7000);
+    renderLibrary();
+  }
+
+  async function exportEntry(entry, asZip = false) {
+    const preset = {
+      name: entry.name,
+      category: typeof entry.category === 'number' && entry.category >= 0 ? entry.category : 0,
+      init: 0,
+      p1: entry.p1 || 0,
+      data: entry.data,
+      characteristics: entry.characteristics || [],
+    };
+    if (!preset.data) return toast('The preset has no valid body.', 'err');
+    const safe = (entry.name || 'preset').replace(/[\\/:*?"<>|]/g, '_');
+    if (!asZip) {
+      const bytes = Mfp.serializeMfp(preset);
+      await window.mfapi.saveFile({
+        defaultName: `${safe}.mfp`,
+        data: Mfp.bytesToB64(bytes),
+        filters: [{ name: 'MicroFreak preset', extensions: ['mfp'] }],
+      });
+    } else {
+      const bytes = await Mfp.serializeMfpz(preset);
+      await window.mfapi.saveFile({
+        defaultName: `${safe}.mfpz`,
+        data: Mfp.bytesToB64(bytes),
+        filters: [{ name: 'Compressed MicroFreak preset', extensions: ['mfpz'] }],
+      });
+    }
+  }
+
+  async function exportAll() {
+    const entries = Library.all();
+    if (!entries.length) return toast('Library is empty.', 'err');
+    const files = [];
+    for (const e of entries) {
+      const entry = Library.get(e.id);
+      if (!entry.data) continue;
+      const preset = {
+        name: entry.name,
+        category: typeof entry.category === 'number' && entry.category >= 0 ? entry.category : 0,
+        init: 0,
+        p1: entry.p1 || 0,
+        data: entry.data,
+        characteristics: entry.characteristics || [],
+      };
+      const bytes = Mfp.serializeMfp(preset);
+      const safe = (entry.name || 'preset').replace(/[\\/:*?"<>|]/g, '_');
+      files.push({ name: `${safe}.mfp`, dataB64: Mfp.bytesToB64(bytes) });
+    }
+    const dir = await window.mfapi.exportFolder(files);
+    if (dir) toast(`Exported ${files.length} presets to ${dir}`, 'ok');
+  }
+
+  async function backupLibrary() {
+    const stateCopy = JSON.stringify({
+      version: 2,
+      entries: Library.all(),
+      customCategories: Library.allCategories(),
+      collections: Library.allCollections(),
+    }, null, 1);
+    await window.mfapi.saveFile({
+      defaultName: `managefreak-backup-${new Date().toISOString().slice(0, 10)}.json`,
+      data: btoa(unescape(encodeURIComponent(stateCopy))),
+      filters: [{ name: 'ManageFreak backup (JSON)', extensions: ['json'] }],
+    });
+  }
+
+  async function pickLibraryEntry() {
+    const entries = Library.all();
+    if (!entries.length) {
+      toast('The library is empty.', 'err');
+      return null;
+    }
+    const opts = entries.map((e) =>
+      `<option value="${e.id}">${esc(e.name)}${e.sourceSlot ? ` (slot ${e.sourceSlot})` : ''}</option>`).join('');
+    const ok = await showModal(
+      'Choose the preset to write',
+      `<select id="m-entry">${opts}</select>`,
+      { okLabel: 'Continue' }
+    );
+    if (!ok) return null;
+    return Library.get(parseInt($('m-entry').value, 10));
+  }
+
+  // ------------------------------------------------------------------ colonne ridimensionabili
+
+  function initResizers() {
+    document.querySelectorAll('.resizer').forEach((rz) => {
+      rz.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const which = rz.dataset.resize; // 'side' | 'right' | 'h'
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const root = document.documentElement;
+        const isHorizontal = which === 'h';
+        const startVar = parseFloat(getComputedStyle(root).getPropertyValue(isHorizontal ? '--h-detail' : '--w-' + which)) || 0;
+        const onMove = (ev) => {
+          let v;
+          if (isHorizontal) {
+            // spostare il bordo verso l'alto espande i dettagli
+            v = startVar - (ev.clientY - startY);
+            v = Math.min(540, Math.max(120, v));
+            root.style.setProperty('--h-detail', v + 'px');
+          } else {
+            if (which === 'side') {
+              // trascinare il divisore verso destra allarga la colonna di sinistra
+              v = startVar + (ev.clientX - startX);
+              v = Math.min(420, Math.max(170, v));
+            } else {
+              // trascinare il divisore verso sinistra allarga la colonna di destra
+              v = startVar - (ev.clientX - startX);
+              v = Math.min(720, Math.max(300, v));
+            }
+            root.style.setProperty('--w-' + which, v + 'px');
+          }
+          rz.classList.add('active');
+        };
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          rz.classList.remove('active');
+          document.body.style.cursor = '';
+          document.body.style.userSelect = '';
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        document.body.style.cursor = isHorizontal ? 'ns-resize' : 'col-resize';
+        document.body.style.userSelect = 'none';
+      });
+    });
+  }
+
+  // ------------------------------------------------------------------ init
+
+  async function init() {
+    // listener libreria → aggiorna griglia e sidebar (senza toccare il pannello
+    // dettagli, per non perdere il focus durante la digitazione delle note)
+    Library.subscribe(() => {
+      renderLibrary();
+    });
+
+    el.btnRefreshPorts.addEventListener('click', async () => {
+      await refreshPorts();
+      // se già connesso, riscansiona i preset del dispositivo
+      if (Midi.isOpen()) scanDevice();
+    });
+    el.btnConnect.addEventListener('click', connect);
+    el.btnReadAll.addEventListener('click', readAllOccupied);
+    el.btnDownloadBank.addEventListener('click', downloadBankToPC);
+    el.btnUploadLibrary.addEventListener('click', uploadLibraryToDevice);
+    el.btnCancel.addEventListener('click', () => {
+      state.cancelRequested = true;
+      toast('Cancellation requested…');
+    });
+    el.btnImport.addEventListener('click', importFiles);
+    el.btnBackup.addEventListener('click', backupLibrary);
+
+    // tema chiaro/scuro
+    let theme = 'dark';
+    try { theme = localStorage.getItem('managefreak-theme') || 'dark'; } catch { /* ignora */ }
+    applyTheme(theme);
+    el.btnTheme.addEventListener('click', () => {
+      applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
+    });
+
+    // ordinamento libreria
+    document.getElementById('sort-select').addEventListener('change', (e) => {
+      state.sortMode = e.target.value;
+      renderLibrary();
+    });
+    el.deviceSearch.addEventListener('input', () => {
+      state.deviceSearch = el.deviceSearch.value;
+      renderDevice();
+    });
+
+    // barra di selezione del dispositivo
+    document.querySelectorAll('#device-selbar [data-dsel]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const act = btn.dataset.dsel;
+        if (act === 'clear') return clearDeviceSelection();
+        if (act === 'read') readDeviceSelectionToLibrary();
+        if (act === 'delete') initDeviceSlots(deviceSelIds());
+      });
+    });
+    document.getElementById('btn-view-toggle').addEventListener('click', () => {
+      state.libView = state.libView === 'grid' ? 'list' : 'grid';
+      renderLibrary();
+    });
+    el.search.addEventListener('input', () => {
+      state.search = el.search.value;
+      renderLibrary();
+    });
+
+    initResizers();
+
+    // traccia la posizione del mouse durante il drag per l'auto-scroll
+    document.addEventListener('dragover', (e) => {
+      if (state.dragInfo && state.dragInfo.active) {
+        state.dragInfo.x = e.clientX;
+        state.dragInfo.y = e.clientY;
+      }
+    });
+
+    // drop da dispositivo → libreria PC (lettura dello slot, inserito nella posizione di rilascio)
+    const libDropInsertIndex = (clientX, clientY) => {
+      const cards = Array.from(el.libGrid.querySelectorAll('.lib-card, .lib-row'));
+      if (!cards.length) return null;
+      let target = null;
+      for (const c of cards) {
+        const r = c.getBoundingClientRect();
+        if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
+          target = c;
+          break;
+        }
+      }
+      if (!target) {
+        for (const c of cards) {
+          const r = c.getBoundingClientRect();
+          if (clientY < r.top) { target = c; break; }
+        }
+        if (!target) target = cards[cards.length - 1];
+      }
+      const rect = target.getBoundingClientRect();
+      const isList = el.libGrid.classList.contains('lib-list-view');
+      const mid = isList ? rect.top + rect.height / 2 : rect.left + rect.width / 2;
+      const after = isList ? clientY >= mid : clientX >= mid;
+      const idx = Library.all().findIndex((x) => x.id === parseInt(target.dataset.id, 10));
+      return idx < 0 ? null : idx + (after ? 1 : 0);
+    };
+    el.libGrid.addEventListener('dragover', (e) => {
+      if (e.dataTransfer.types.includes('application/x-managefreak-slot')) {
+        e.preventDefault();
+        el.libGrid.classList.add('drop-slot');
+      }
+    });
+    el.libGrid.addEventListener('dragleave', () => el.libGrid.classList.remove('drop-slot'));
+    el.libGrid.addEventListener('drop', (e) => {
+      e.preventDefault();
+      el.libGrid.classList.remove('drop-slot');
+      const slotStr = e.dataTransfer.getData('application/x-managefreak-slot');
+      const slot = slotStr ? parseInt(slotStr, 10) : 0;
+      if (!slot) return;
+      const insertIndex = libDropInsertIndex(e.clientX, e.clientY);
+      importDeviceSlotToLibrary(slot, insertIndex);
+    });
+
+    /** Reads a device slot and adds it to the library
+     *  (at the end or at the given position). */
+    async function importDeviceSlotToLibrary(slot, insertIndex) {
+      if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+      setBusy(true, `Reading slot ${slot}…`);
+      try {
+        const preset = await MF.readPreset(slot, { timeoutMs: 4000 });
+        if (!preset.data) return toast(`Slot ${slot} is empty (Init).`, 'err');
+        if (isInitNamed(preset)) return toast(`Slot ${slot} contains the Init preset: it is not added to the library.`, 'err');
+        const collectionId = targetCollectionId();
+        Library.addAt(preset, { sourceName: `Device slot ${slot}`, collectionId }, insertIndex);
+        const collName = collectionId ? Library.collectionName(collectionId) : '';
+        toast(`"${preset.name}" added to the library${collName ? ` "${collName}"` : ''} ✓`, 'ok');
+      } catch (e) {
+        toast('Read failed: ' + (e.message || e), 'err', 5000);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // drop sul pannello MicroFreak:
+    //  - su un preset (zona centrale) → scambio 1:1
+    //  - tra due preset (bordi/gap) → shift (spostamento con scorrimento)
+    // ---------------------------------------------------------------------
+    const clearSlotHighlights = () => {
+      el.slotList.querySelectorAll('.slot-row').forEach((r) =>
+        r.classList.remove('drag-over', 'swap-over', 'drop-before', 'drop-after'));
+    };
+    const resolveSlotDrop = (clientY) => {
+      const rows = Array.from(el.slotList.querySelectorAll('.slot-row'));
+      if (!rows.length) return null;
+      let hit = null;
+      for (const row of rows) {
+        const r = row.getBoundingClientRect();
+        if (clientY >= r.top && clientY <= r.bottom) {
+          const rel = (clientY - r.top) / r.height;
+          let mode;
+          if (rel < 0.3) mode = 'before';
+          else if (rel > 0.7) mode = 'after';
+          else mode = 'onto';
+          hit = { slot: parseInt(row.dataset.slot, 10), mode };
+          break;
+        }
+      }
+      if (!hit) {
+        // in un interstizio tra le righe (o fuori): prima della riga sotto il cursore
+        hit = { slot: parseInt(rows[rows.length - 1].dataset.slot, 10), mode: 'after' };
+        for (const row of rows) {
+          const r = row.getBoundingClientRect();
+          if (clientY < r.top) {
+            hit = { slot: parseInt(row.dataset.slot, 10), mode: 'before' };
+            break;
+          }
+        }
+      }
+      return hit;
+    };
+    const handleSlotDrop = async (e, target) => {
+      const entryId = e.dataTransfer.getData('application/x-managefreak');
+      if (entryId) {
+        const entry = Library.get(parseInt(entryId, 10));
+        if (!entry) return;
+        const yes = await showModal(
+          `Confirm write to slot ${target.slot}`,
+          `<p>Write <strong>"${esc(entry.name)}"</strong> to slot ${target.slot} on the MicroFreak?</p>
+           <label><input type="checkbox" id="m-select" checked /> Select the preset after writing</label>`,
+          { okLabel: 'Send to MicroFreak' }
+        );
+        if (yes) writeToSlot(target.slot, entry, { selectAfter: $('m-select').checked });
+        return;
+      }
+      const srcSlot = parseInt(e.dataTransfer.getData('application/x-managefreak-slot'), 10);
+      if (!srcSlot || srcSlot === target.slot) return;
+      const moved = state.dragDeviceBlock && state.dragDeviceBlock.length > 1
+        ? state.dragDeviceBlock
+        : [srcSlot];
+      if (target.mode === 'onto' && moved.length === 1) {
+        await swapDeviceSlots(moved[0], target.slot); // scambio 1:1
+      } else {
+        await moveDeviceSelectionTo(moved, target.slot, target.mode === 'after'); // shift
+      }
+    };
+    el.slotList.addEventListener('dragover', (e) => {
+      const types = e.dataTransfer.types;
+      if (!types.includes('application/x-managefreak') && !types.includes('application/x-managefreak-slot')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      clearSlotHighlights();
+      const target = resolveSlotDrop(e.clientY);
+      if (!target) return;
+      const row = el.slotList.querySelector(`.slot-row[data-slot="${target.slot}"]`);
+      if (row) {
+        if (target.mode === 'onto') row.classList.add('swap-over');
+        else if (target.mode === 'before') row.classList.add('drop-before');
+        else row.classList.add('drop-after');
+      }
+    });
+    el.slotList.addEventListener('dragleave', (e) => {
+      if (!e.relatedTarget || !el.slotList.contains(e.relatedTarget)) clearSlotHighlights();
+    });
+    el.slotList.addEventListener('drop', async (e) => {
+      const types = e.dataTransfer.types;
+      if (!types.includes('application/x-managefreak') && !types.includes('application/x-managefreak-slot')) return;
+      e.preventDefault();
+      clearSlotHighlights();
+      const target = resolveSlotDrop(e.clientY);
+      if (target) await handleSlotDrop(e, target);
+    });
+
+    // scorciatoie: Esc deseleziona, Ctrl+A seleziona tutti, Canc elimina (con conferma)
+    document.addEventListener('keydown', (e) => {
+      const ae = document.activeElement;
+      const typing = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
+      if (e.key === 'Escape') {
+        if (state.selLib.size && !typing) clearSelection();
+        return;
+      }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !typing) {
+        if (state.selLib.size) {
+          e.preventDefault();
+          confirmDeleteLibrarySelection();
+        } else if (state.selectedDeviceSlots.size) {
+          e.preventDefault();
+          initDeviceSlots(deviceSelIds());
+        }
+        return;
+      }
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+        if (typing) return;
+        e.preventDefault();
+        if (state.activePane === 'device') navigateDevice(e.key);
+        else navigateLibrary(e.key);
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && !typing) {
+        e.preventDefault();
+        const all = filteredEntries().map((x) => x.id);
+        state.selLib = new Set(all);
+        state.selAnchor = all.length ? all[0] : null;
+        updateSelectionUI();
+      }
+    });
+
+    const info = await window.mfapi.appInfo();
+    document.title = `ManageFreak v${info.version}`;
+
+    await Library.load();
+    renderLibrary();
+    renderSelBar();
+    renderDevice();
+    showDetailEmpty();
+
+    if (Midi.supported()) {
+      await refreshPorts();
+      // connetti automaticamente se entrambe le porte puntano a un MicroFreak
+      const inName = el.midiInput.selectedOptions[0]?.textContent.toLowerCase() || '';
+      const outName = el.midiOutput.selectedOptions[0]?.textContent.toLowerCase() || '';
+      if (inName.includes('microfreak') && outName.includes('microfreak')) {
+        setTimeout(connect, 400);
+      }
+    } else {
+      status('Web MIDI is not supported in this runtime.');
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', init);
+
+  return { refreshPorts, connect, scanDevice, renderDevice, renderLibrary };
+})();

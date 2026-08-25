@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: app
+      - name: Run tests
+        run: npm test
+        working-directory: app
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            args: --win
+          - os: macos-latest
+            args: --mac
+          - os: ubuntu-latest
+            args: --linux
+    runs-on: ${{ matrix.os }}
+    env:
+      # Unsigned builds: skip code signing (no certificates in CI)
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: app
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Build installers
+        run: npx electron-builder ${{ matrix.args }}
+        working-directory: app
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ManageFreak-${{ matrix.os }}
+          path: |
+            app/dist/*.exe
+            app/dist/*.AppImage
+            app/dist/*.deb
+            app/dist/*.dmg
+            app/dist/*.zip
+            app/dist/*.blockmap
+            app/dist/*.yml
+          if-no-files-found: warn
