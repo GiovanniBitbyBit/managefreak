@@ -3052,7 +3052,6 @@ const App = (() => {
     // corpo in background; una selezione più recente cancella questa lettura
     try {
       const wt = await MF.readWavetable(slot, {
-        header: header || undefined,
         shouldCancel: () => token !== state.wtReadToken,
       });
       if (token !== state.wtReadToken) return;
@@ -3109,7 +3108,6 @@ const App = (() => {
     // corpo in background; una selezione più recente cancella questa lettura
     try {
       const s = await MF.readSample(slot, {
-        header: header || undefined,
         shouldCancel: () => token !== state.sampleReadToken,
       });
       if (token !== state.sampleReadToken) return;

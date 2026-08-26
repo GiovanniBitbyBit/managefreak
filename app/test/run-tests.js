@@ -1003,12 +1003,18 @@ async function test(name, fn) {
     const stub = makeMidiStub();
     global.Midi = stub.Midi;
     const raw = new Uint8Array(28);
-    raw[4] = 4096; // 1 blocco
+    raw[4] = 4096 & 0xff;              // lunghezza 4096 little-endian
+    raw[5] = (4096 >> 8) & 0xff;
+    raw[6] = (4096 >> 16) & 0xff;
+    raw[7] = (4096 >> 24) & 0xff;
     raw[10] = 0x41;
-    const headerObj = { slot: 1, name: 'A', sizeBytes: 4096, checksum: 0, empty: false, raw };
+    stub.queue(
+      sysex(0, 0x15, []),                               // 5B → 15 (selezione)
+      sysex(0, 0x16, MF.pack7to8(raw)),                 // 18 → header
+    );
     let cancelled = false;
     let cancelNow = false;
-    const p = MF.readSample(1, { header: headerObj, shouldCancel: () => cancelNow });
+    const p = MF.readSample(1, { shouldCancel: () => cancelNow });
     cancelNow = true;
     try {
       await p;
@@ -1016,7 +1022,9 @@ async function test(name, fn) {
       cancelled = /Operation cancelled/.test(e.message);
     }
     assert.ok(cancelled, 'la lettura deve essere annullabile');
-    assert.strictEqual(stub.calls.length, 0, 'dopo la cancellazione non parte alcuna richiesta MIDI');
+    // la selezione dello slot avviene sempre, ma il corpo non parte
+    assert.ok(stub.calls.some((c) => c.op === 0x5b), 'la selezione dello slot deve avvenire');
+    assert.ok(!stub.calls.some((c) => c.op === 0x59), 'dopo la cancellazione non parte il corpo');
   });
 
   // ================================================================== MFP: wavetable/sample

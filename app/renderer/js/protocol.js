@@ -614,8 +614,9 @@ const MF = (() => {
     };
   }
 
-  async function readWavetable(slot, { onProgress, timeoutMs = 2500, shouldCancel, header } = {}) {
-    if (!header) header = await readWavetableHeader(slot, timeoutMs);
+  async function readWavetable(slot, { onProgress, timeoutMs = 2500, shouldCancel } = {}) {
+    // la lettura dell'header (op 57) seleziona lo slot e inizializza lo stream
+    const header = await readWavetableHeader(slot, timeoutMs);
     if (header.empty) return { ...header, data: null };
     const id0 = slot - 1;
     const data = new Uint8Array(WAVE_PCM_BYTES);
@@ -758,8 +759,10 @@ const MF = (() => {
     };
   }
 
-  async function readSample(slot, { onProgress, timeoutMs = 2500, shouldCancel, header } = {}) {
-    if (!header) header = await readSampleHeader(slot, timeoutMs);
+  async function readSample(slot, { onProgress, timeoutMs = 2500, shouldCancel } = {}) {
+    // la lettura dell'header (op 5B) seleziona lo slot e resetta lo stream:
+    // non va mai saltata, anche se l'header è già in memoria
+    const header = await readSampleHeader(slot, timeoutMs);
     if (header.empty) return { ...header, data: null };
     const id0 = slot - 1;
     const partCount = Math.ceil(header.sizeBytes / SAMPLE_PART_BYTES);
