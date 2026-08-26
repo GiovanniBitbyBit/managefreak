@@ -11,9 +11,13 @@ const path = require('path');
 function makeMidiStub() {
   const calls = [];
   let script = [];
+  let anyScript = [];
+  let receiveQueue = [];
   return {
     calls,
     queue(...msgs) { script = msgs; },
+    queueAny(...msgs) { anyScript = msgs; },
+    queueReceive(...msgs) { receiveQueue = msgs; },
     get remaining() { return script.length; },
     Midi: {
       requestSysex: async (op, payload) => {
@@ -22,6 +26,22 @@ function makeMidiStub() {
         if (next instanceof Error) throw next;
         if (next === undefined) throw new Error('script esaurito');
         return Uint8Array.from(next);
+      },
+      requestSysexAny: async (op, payload) => {
+        calls.push({ op, payload: payload ? Array.from(payload) : null, any: true });
+        const next = anyScript.shift();
+        if (next instanceof Error) throw next;
+        if (next === undefined) throw new Error('script any esaurito');
+        return Uint8Array.from(next);
+      },
+      receiveSysex: async () => {
+        const next = receiveQueue.shift();
+        if (next instanceof Error) throw next;
+        if (next === undefined) throw new Error('receive esaurito');
+        return Uint8Array.from(next);
+      },
+      sendSysex: (op, payload) => {
+        calls.push({ op, payload: payload ? Array.from(payload) : null, send: true });
       },
       sendCC: () => {},
       sendPC: () => {},
@@ -704,6 +724,338 @@ async function test(name, fn) {
     const { newSeq, writes } = Shift.planShift(occupied, [6, 7], 1, false);
     assert.deepStrictEqual(newSeq, [6, 7, 1, 2, 3, 4, 5]);
     assert.deepStrictEqual(applyWrites(occupied, writes), newSeq);
+  });
+
+  // ================================================================== GLOBALS / WAVETABLE / SAMPLE
+  console.log('Global settings, wavetable e sample:');
+
+  const altSysex = (op, payload) => {
+    const p = payload ? Array.from(payload) : [];
+    return [0xf0, 0x00, 0x20, 0x6b, 0x07, 0x7f, 0x02, p.length, op, ...p, 0xf7];
+  };
+  const ack = () => sysex(0, 0x18, []);
+
+  await test('pack7to8/unpack8to7 round-trip', () => {
+    const raw = new Uint8Array(28);
+    for (let i = 0; i < 28; i++) raw[i] = (i * 13 + 7) & 0xff;
+    const packed = MF.pack7to8(raw);
+    assert.strictEqual(packed.length, 32);
+    assert.ok(packed.every((b) => b <= 0x7f));
+    const back = MF.unpack8to7(packed);
+    assert.deepStrictEqual(Array.from(back), Array.from(raw));
+  });
+
+  await test('readGlobalCode: op 43 → reply alt op 42 con valore', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const code = MF.GLOBAL_CODES['keyboard.root_note'];
+    stub.queueAny(altSysex(0x42, [code, 5]));
+    const v = await MF.readGlobalCode(code);
+    assert.strictEqual(v, 5);
+  });
+
+  await test('writeGlobalSetting: scrive op 42 e verifica con op 43', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const code = MF.GLOBAL_CODES['keyboard.root_note'];
+    stub.queueAny(altSysex(0x42, [code, 0]), altSysex(0x42, [code, 7]));
+    await MF.writeGlobalSetting('keyboard.root_note', 7);
+    const sent = stub.calls.find((c) => c.send && c.op === 0x42);
+    assert.deepStrictEqual(sent.payload, [code, 7]);
+  });
+
+  await test('writeGlobalSetting: readback diverso → ripristina e fallisce', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const code = MF.GLOBAL_CODES['keyboard.root_note'];
+    stub.queueAny(
+      altSysex(0x42, [code, 0]),  // before
+      altSysex(0x42, [code, 3]),  // readback errato (atteso 7)
+      altSysex(0x42, [code, 0]),  // restore verified
+    );
+    let failed = false;
+    try {
+      await MF.writeGlobalSetting('keyboard.root_note', 7);
+    } catch {
+      failed = true;
+    }
+    assert.ok(failed);
+  });
+
+  await test('globalLabel: valori ammessi (es. midi.merge, tuning.master, cv.press_range)', () => {
+    assert.strictEqual(MF.globalLabel('midi.merge', 3), 'MIDI+USB+KBD');
+    assert.strictEqual(MF.globalLabel('tuning.master', 64), '0 cents');
+    assert.strictEqual(MF.globalLabel('tuning.master', 65), '1 cent');
+    assert.strictEqual(MF.globalLabel('cv.press_range', 5), '6 V');
+    assert.strictEqual(MF.globalLabel('microphone.gain', 72), 'Auto Gain');
+    assert.strictEqual(MF.globalLabel('microphone.gain', 12), '0 dB');
+    assert.strictEqual(MF.globalLabel('keyboard.root_note', 9), 'A');
+    assert.strictEqual(MF.globalLabel('keyboard.scale', 3), 'HarmoMinor');
+    assert.strictEqual(MF.globalLabel('cv.zero_volt_reference', 60), 'C3');
+    assert.strictEqual(MF.globalLabel('midi.channel_in', 126), 'None');
+  });
+
+  await test('readSampleStats: op 47 → reply alt op 48 (conteggio tempo)', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    // used = 100000 ms → (100000>>2) = 0x61A8 → lsb 0xA8 (flag 0x08 in p[2]), msb 0x61
+    const lsb = 0xa8 & 0x7f;
+    const msb = 0x61;
+    const payload9 = [0, 0, 0x08, 0, 0, 0, lsb, msb, 0];
+    stub.queueAny(altSysex(0x48, payload9));
+    const stats = await MF.readSampleStats();
+    assert.strictEqual(stats.usedMs, 100000);
+    assert.strictEqual(stats.freeMs, MF.SAMPLE_TOTAL_CAPACITY_MS - 100000);
+    assert.strictEqual(stats.capacityMs, 209920);
+    // sessione: 1C inviato prima, 1D dopo
+    const ops = stub.calls.filter((c) => c.send).map((c) => c.op);
+    assert.strictEqual(ops[0], 0x1c);
+    assert.strictEqual(ops[ops.length - 1], 0x1d);
+  });
+
+  const wtHeaderRaw = (slot, name, { empty = false } = {}) => {
+    const h = new Uint8Array(28);
+    h[0] = slot - 1;
+    h[3] = empty ? 0x08 : 0;
+    h[8] = slot - 1;
+    h[10] = 1;
+    h[11] = 1;
+    for (let i = 0; i < name.length && i < 15; i++) h[12 + i] = name.charCodeAt(i);
+    return h;
+  };
+
+  // 147 pacchetti per parte: 146×28 byte + 8 utili nel finale
+  const partPackets = (pcm, partOff) => {
+    const out = [];
+    for (let packet = 0; packet < 147; packet++) {
+      const off = partOff + packet * 28;
+      let raw;
+      if (packet === 146) {
+        raw = new Uint8Array(28);
+        raw.set(pcm.subarray(off, off + 8));
+      } else {
+        raw = pcm.subarray(off, off + 28);
+      }
+      const op = packet === 146 ? 0x17 : 0x16;
+      out.push(sysex(0, op, MF.pack7to8(raw)));
+    }
+    return out;
+  };
+
+  const makePcm = (len, seed) => {
+    const p = new Uint8Array(len);
+    for (let i = 0; i < len; i++) p[i] = (i * 11 + seed) & 0xff;
+    return p;
+  };
+
+  await test('readWavetable: header + 4 parti (16384 byte)', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const pcm = makePcm(16384, 3);
+    const script = [
+      sysex(0, 0x15, []),                                  // reply a 0x57
+      sysex(0, 0x16, MF.pack7to8(wtHeaderRaw(2, 'MyTable'))), // reply a 0x18 [1]
+    ];
+    for (let part = 0; part < 4; part++) {
+      script.push(sysex(0, 0x15, []));                     // reply a 0x55
+      script.push(...partPackets(pcm, part * 4096));
+    }
+    stub.queue(...script);
+    const wt = await MF.readWavetable(2);
+    assert.strictEqual(wt.name, 'MyTable');
+    assert.strictEqual(wt.empty, false);
+    assert.deepStrictEqual(Array.from(wt.data), Array.from(pcm));
+  });
+
+  await test('writeWavetable: upload guardato con verifica readback', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const before = makePcm(16384, 5);
+    const target = makePcm(16384, 9);
+    const oldHeader = MF.pack7to8(wtHeaderRaw(1, 'Old'));
+    // preflight: readWavetableHeader (2×: una per writeWavetable, una per readWavetable)
+    const script = [
+      sysex(0, 0x15, []),
+      sysex(0, 0x16, oldHeader),
+      sysex(0, 0x15, []),
+      sysex(0, 0x16, oldHeader),
+    ];
+    // corpo attuale (before): 4 parti
+    for (let part = 0; part < 4; part++) {
+      script.push(sysex(0, 0x15, []));
+      script.push(...partPackets(before, part * 4096));
+    }
+    // setWavetableEntry: 56→18, 15→18, 16(header)→18, 17(8 zeri)→18
+    script.push(ack(), ack(), ack(), ack());
+    // uploadWavetableParts: per parte 54→18, 15→18, 147 ack
+    for (let part = 0; part < 4; part++) {
+      script.push(ack(), ack());
+      for (let packet = 0; packet < 147; packet++) script.push(ack());
+    }
+    // readback: header + 4 parti con il target
+    script.push(
+      sysex(0, 0x15, []),
+      sysex(0, 0x16, MF.pack7to8(wtHeaderRaw(1, 'New'))),
+    );
+    for (let part = 0; part < 4; part++) {
+      script.push(sysex(0, 0x15, []));
+      script.push(...partPackets(target, part * 4096));
+    }
+    stub.queue(...script);
+    await MF.writeWavetable(1, { name: 'New', data: target });
+    // nessuna eccezione = verifica readback passata
+  });
+
+  await test('readSampleHeader + readSample (corpo 4096+ byte)', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const audio = makePcm(8192, 7); // 8192 byte → 2 blocchi
+    const header = new Uint8Array(28);
+    header[4] = audio.length & 0xff;
+    header[5] = (audio.length >> 8) & 0xff;
+    header[6] = (audio.length >> 16) & 0xff;
+    header[7] = (audio.length >> 24) & 0xff;
+    header[10] = 0x4e; // 'N'
+    header[11] = 0x65; // 'e'
+    header[12] = 0x79; // 'y'
+    header[23] = 2;
+    const script = [
+      sysex(0, 0x15, []),                                  // 5B
+      sysex(0, 0x16, MF.pack7to8(header)),                 // 18 → header
+      // readSample: header letto una sola volta, poi i 2 blocchi
+      sysex(0, 0x15, []),
+      ...partPackets(audio, 0),
+      sysex(0, 0x15, []),
+      ...partPackets(audio, 4096),
+    ];
+    stub.queue(...script);
+    const s = await MF.readSample(3);
+    assert.strictEqual(s.name, 'Ney');
+    assert.strictEqual(s.sizeBytes, 8192);
+    assert.deepStrictEqual(Array.from(s.data), Array.from(audio));
+  });
+
+  await test('writeSample: allocazione, parti e verifica readback', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const audio = makePcm(8192, 11);
+    const header = new Uint8Array(28);
+    header[4] = audio.length & 0xff;
+    header[5] = (audio.length >> 8) & 0xff;
+    header[6] = (audio.length >> 16) & 0xff;
+    header[7] = (audio.length >> 24) & 0xff;
+    for (let i = 0; i < 3; i++) header[10 + i] = 'New'.charCodeAt(i);
+    header[23] = 0;
+    const packedHeader = MF.pack7to8(header);
+
+    const script = [];
+    // preflight: readSampleHeader (2×, una per writeSample, una dentro readSample)
+    script.push(sysex(0, 0x15, []), sysex(0, 0x16, packedHeader));
+    script.push(sysex(0, 0x15, []), sysex(0, 0x16, packedHeader));
+    script.push(sysex(0, 0x15, []), ...partPackets(audio, 0));
+    script.push(sysex(0, 0x15, []), ...partPackets(audio, 4096));
+    // alloc: 5D→18, 15→18, 17(header)→16[1], receive non richiesta → 18
+    script.push(ack(), ack(), sysex(0, 0x16, [0x01]));
+    stub.queueReceive(ack());
+    // reset header: 5A→18, 15→18, 17(header)→18
+    script.push(ack(), ack(), ack());
+    // parti: 2 blocchi × (58→18, 15→18, 147 ack)
+    for (let b = 0; b < 2; b++) {
+      script.push(ack(), ack());
+      for (let packet = 0; packet < 147; packet++) script.push(ack());
+    }
+    // finalize: 5B→15, 147 pacchetti
+    script.push(sysex(0, 0x15, []));
+    for (let packet = 0; packet < 147; packet++) {
+      script.push(sysex(0, packet === 146 ? 0x17 : 0x16, new Uint8Array(32)));
+    }
+    // readback: header + corpo
+    script.push(sysex(0, 0x15, []), sysex(0, 0x16, packedHeader));
+    script.push(sysex(0, 0x15, []), ...partPackets(audio, 0));
+    script.push(sysex(0, 0x15, []), ...partPackets(audio, 4096));
+    stub.queue(...script);
+    stub.queueAny(altSysex(0x48, [0, 0, 0, 0, 0, 0, 0, 0, 0])); // stats: used 0 → free pieno
+
+    await MF.writeSample(1, 'New', audio);
+  });
+
+  // ================================================================== MFP: wavetable/sample
+  console.log('Formati wavetable/sample (.mfw/.mfwz/.mfsample/WAV):');
+
+  await test('round-trip .mfw (16384 byte PCM16LE)', () => {
+    const data = new Uint8Array(16384);
+    for (let i = 0; i < data.length; i++) data[i] = (i * 3 + 1) & 0xff;
+    const out = Mfp.serializeMfw({ name: 'SawX', data });
+    const parsed = Mfp.parseMfw(out);
+    assert.strictEqual(parsed.versionTag, 'DEVBUILD');
+    assert.strictEqual(parsed.name, 'SawX');
+    assert.strictEqual(parsed.p0, 1);
+    assert.strictEqual(parsed.p5, 1);
+    assert.deepStrictEqual(Array.from(parsed.data), Array.from(data));
+  });
+
+  await test('round-trip .mfwz (zip 0_sample)', async () => {
+    const data = new Uint8Array(16384);
+    const out = await Mfp.serializeMfwz({ name: 'Tab', data });
+    const parsed = await Mfp.parseMfwz(out);
+    assert.strictEqual(parsed.name, 'Tab');
+    assert.deepStrictEqual(Array.from(parsed.data), Array.from(data));
+  });
+
+  await test('round-trip .mfsample (header 28 + corpo)', () => {
+    const header = new Uint8Array(28);
+    header[4] = 0x34; // 52 byte
+    const data = new Uint8Array(52);
+    for (let i = 0; i < 52; i++) data[i] = i & 0xff;
+    const out = Mfp.serializeMsample(header, data);
+    assert.strictEqual(out.length, 80);
+    const parsed = Mfp.parseMsample(out);
+    assert.deepStrictEqual(Array.from(parsed.header), Array.from(header));
+    assert.deepStrictEqual(Array.from(parsed.data), Array.from(data));
+  });
+
+  const makeWav = ({ channels = 1, bits = 16, rate, data }) => {
+    const bytesPerSample = bits / 8;
+    const out = new Uint8Array(44 + data.length);
+    const dv = new DataView(out.buffer);
+    out.set([0x52, 0x49, 0x46, 0x46], 0);
+    dv.setUint32(4, 36 + data.length, true);
+    out.set([0x57, 0x41, 0x56, 0x45], 8);
+    out.set([0x66, 0x6d, 0x74, 0x20], 12);
+    dv.setUint32(16, 16, true);
+    dv.setUint16(20, 1, true);
+    dv.setUint16(22, channels, true);
+    dv.setUint32(24, rate, true);
+    dv.setUint32(28, rate * channels * bytesPerSample, true);
+    dv.setUint16(32, channels * bytesPerSample, true);
+    dv.setUint16(34, bits, true);
+    out.set([0x64, 0x61, 0x74, 0x61], 36);
+    dv.setUint32(40, data.length, true);
+    out.set(data, 44);
+    return out;
+  };
+
+  await test('wavToWavetable: WAV mono 32kHz 8192 campioni', () => {
+    const pcm = new Uint8Array(16384);
+    for (let i = 0; i < 16384; i++) pcm[i] = (i * 5) & 0xff;
+    const wav = makeWav({ rate: 32000, data: pcm });
+    const wt = Mfp.wavToWavetable(wav, 'My Table');
+    assert.strictEqual(wt.name, 'My Table');
+    assert.strictEqual(wt.data.length, 16384);
+    assert.deepStrictEqual(Array.from(wt.data), Array.from(pcm));
+  });
+
+  await test('wavToSample: risampla a 32 kHz e rispetta il limite', () => {
+    // 16000 Hz, 8000 campioni → a 32 kHz diventano 16000 campioni (32000 byte)
+    const pcm = new Uint8Array(16000);
+    for (let i = 0; i < 16000; i++) pcm[i] = (i * 7) & 0xff;
+    const wav = makeWav({ rate: 16000, data: pcm });
+    const s = Mfp.wavToSample(wav, 'Drum');
+    assert.strictEqual(s.data.length, 32000);
+    assert.ok(s.data.length <= 24 * 32000 * 2);
+    // WAV troppo lungo → errore
+    const tooLong = makeWav({ rate: 32000, data: new Uint8Array(25 * 32000 * 2) });
+    assert.throws(() => Mfp.wavToSample(tooLong, 'X'), /24 s/);
   });
 
   // ================================================================== FINE

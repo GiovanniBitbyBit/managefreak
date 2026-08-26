@@ -166,6 +166,74 @@ const Midi = (() => {
       });
     },
 
+    /**
+     * Invia un SysEx e attende la PRIMA risposta SysEx in ingresso, usando
+     * l'envelope alternativa 07 7F (controlli/global: la sequenza nella
+     * risposta è generata dal dispositivo, non è l'echo della richiesta).
+     * @returns {Promise<Uint8Array>} messaggio completo ricevuto
+     */
+    requestSysexAny(op, payload, timeoutMs = 2500) {
+      return new Promise((resolve, reject) => {
+        if (!input || !output) {
+          reject(new Error('MIDI ports not open'));
+          return;
+        }
+        let done = false;
+        const off = this.onMessage((data) => {
+          if (done) return;
+          if (data[0] !== 0xf0) return;
+          // envelope alternativa: F0 00 20 6B 07 7F ...
+          if (!(data[1] === 0x00 && data[2] === 0x20 && data[3] === 0x6b &&
+                data[4] === 0x07 && data[5] === 0x7f)) return;
+          done = true;
+          clearTimeout(timer);
+          off();
+          resolve(data);
+        });
+        const timer = setTimeout(() => {
+          if (!done) {
+            done = true;
+            off();
+            reject(new Error(`MIDI timeout (op 0x${op.toString(16)})`));
+          }
+        }, timeoutMs);
+        try {
+          this.sendSysex(op, payload);
+        } catch (e) {
+          done = true;
+          clearTimeout(timer);
+          off();
+          reject(e);
+        }
+      });
+    },
+
+    /** Attende il prossimo messaggio SysEx in ingresso senza inviare nulla. */
+    receiveSysex(timeoutMs = 2500) {
+      return new Promise((resolve, reject) => {
+        if (!input) {
+          reject(new Error('MIDI ports not open'));
+          return;
+        }
+        let done = false;
+        const off = this.onMessage((data) => {
+          if (done) return;
+          if (data[0] !== 0xf0) return;
+          done = true;
+          clearTimeout(timer);
+          off();
+          resolve(data);
+        });
+        const timer = setTimeout(() => {
+          if (!done) {
+            done = true;
+            off();
+            reject(new Error('MIDI timeout'));
+          }
+        }, timeoutMs);
+      });
+    },
+
     sendCC(channel, cc, value) {
       if (!output) return;
       output.send([0xb0 | (channel & 0x0f), cc & 0x7f, value & 0x7f]);

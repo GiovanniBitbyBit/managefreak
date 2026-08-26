@@ -715,3 +715,152 @@ select {
 ::-webkit-scrollbar-thumb { background: #33333f; border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: #3d3d4c; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------------------------------------------------------------- tab bar */
+#tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+.tab-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 5px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.tab-btn:hover { color: var(--text); background: var(--bg2); }
+.tab-btn.active {
+  color: var(--accent2);
+  border-color: var(--border);
+  background: var(--bg2);
+  font-weight: 600;
+}
+
+.tab-view { display: block; }
+.tab-view.hidden { display: none; }
+
+/* nascondi ricerca, pannello dettagli e divisorio orizzontale fuori da Presets */
+#content.tab-wavetables #content-toolbar,
+#content.tab-samples #content-toolbar,
+#content.tab-device #content-toolbar { display: none; }
+#layout.tab-wavetables #detail-pane,
+#layout.tab-samples #detail-pane,
+#layout.tab-device #detail-pane,
+#layout.tab-wavetables .resizer-h,
+#layout.tab-samples .resizer-h,
+#layout.tab-device .resizer-h { display: none; }
+
+.tab-header { margin-bottom: 12px; }
+.tab-header-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.tab-header h2 { margin: 0; font-size: 15px; }
+.tab-actions { display: flex; gap: 6px; margin-left: auto; }
+.tab-header .hint { margin: 8px 0 0; font-size: 12px; color: var(--muted); max-width: 760px; }
+
+/* ---------------------------------------------------------------- wavetables */
+.wt-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.wt-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wt-card.empty { opacity: .55; }
+.wt-card .wt-num { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.wt-card .wt-name {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wt-card .wt-actions { display: flex; gap: 4px; margin-top: auto; }
+.wt-card .wt-actions .btn { flex: 1; }
+
+/* ---------------------------------------------------------------- samples */
+.sample-stats {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.mem-bar {
+  flex: 1;
+  max-width: 420px;
+  height: 10px;
+  background: var(--bg3);
+  border-radius: 5px;
+  overflow: hidden;
+}
+#sm-mem-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent2);
+  transition: width .2s;
+}
+#sm-mem-text { font-size: 12px; font-variant-numeric: tabular-nums; }
+
+.sm-list { display: flex; flex-direction: column; gap: 3px; }
+.sm-row {
+  display: grid;
+  grid-template-columns: 44px 1fr 130px 64px auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 13px;
+}
+.sm-row:hover { background: var(--bg2); }
+.sm-row.empty { color: var(--muted); }
+.sm-row .sm-num { color: var(--muted); font-variant-numeric: tabular-nums; }
+.sm-row .sm-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sm-row .sm-time { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+.sm-row .sm-actions { display: flex; gap: 4px; justify-content: flex-end; }
+
+/* ---------------------------------------------------------------- device */
+.dev-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 22px;
+  max-width: 900px;
+}
+.dev-col { display: flex; flex-direction: column; gap: 8px; }
+.dev-row {
+  display: grid;
+  grid-template-columns: 1fr 200px;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.dev-row label { color: var(--text); }
+.dev-row select {
+  width: 100%;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  color: var(--text);
+  outline: none;
+}
+.dev-row select:focus { border-color: var(--accent2); }
+.dev-row.dirty select { border-color: var(--yellow); }
+@media (max-width: 1100px) {
+  .dev-cols { grid-template-columns: 1fr; }
+}

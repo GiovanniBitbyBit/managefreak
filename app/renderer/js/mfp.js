@@ -435,6 +435,196 @@ const Mfp = (() => {
     return { name: h.name, category: h.category, p1: h.p1, rawHeader: Uint8Array.from(header), data };
   }
 
+  // -------------------------------------------------------------------------
+  // Wavetable: .mfw (Boost text + 16384 byte PCM16LE), .mfwz (zip 0_sample)
+  //   Layout: 22 serialization::archive 10 0 4 <vlen> <tag> <nlen> <name>
+  //           <p0> 0 0 18 <bits> <p3> 0 <p5> <datalen> <signed bytes>\n
+  //   WAV sorgente: mono PCM16, 32000 Hz, esattamente 8192 campioni
+  //   (32 cicli × 256 campioni), come richiesto da MCC/freakout.
+  // -------------------------------------------------------------------------
+
+  const MFW_PCM_BYTES = 16384;
+  const MFW_WAV_FRAMES = 8192;
+  const MFW_WAV_RATE = 32000;
+
+  function serializeMfw({ name = '', versionTag = 'DEVBUILD', p0 = 1, p3 = 0, p5 = 1, data, characteristics = [] }) {
+    if (!data || data.length !== MFW_PCM_BYTES) throw new Error('Invalid wavetable body length (expected 16384 bytes)');
+    const parts = [];
+    parts.push(`22 serialization::archive 10 0 4`);
+    const tag = (versionTag || 'DEVBUILD').slice(0, 64);
+    parts.push(`${tag.length} ${tag}`);
+    const nm = (name || '').slice(0, 15);
+    parts.push(`${nm.length} ${nm}`);
+    parts.push(`${p0 & 0x7f} 0 0`);
+    parts.push(`18 ${characteristicsToBitset(characteristics || [])}`);
+    parts.push(`${p3 & 0x7f} 0 ${p5 & 0x7f}`);
+    parts.push(`${data.length}`);
+    let body = parts.join(' ');
+    for (let i = 0; i < data.length; i++) {
+      const b = data[i];
+      body += ' ' + (b > 127 ? b - 256 : b);
+    }
+    body += '\n';
+    return te.encode(body);
+  }
+
+  function parseMfw(bytes) {
+    const text = bytesToText(bytes).replace(/\r\n/g, '\n');
+    const tokens = text.trim().split(/\s+/);
+    let i = 0;
+    const num = () => parseInt(tokens[i++], 10);
+
+    if (num() !== 22 || tokens[i++] !== 'serialization::archive') {
+      throw new Error('Unrecognized wavetable file (serialization::archive header missing)');
+    }
+    if (num() !== 10 || num() !== 0 || num() !== 4) {
+      throw new Error('Unrecognized wavetable file (unexpected version fields)');
+    }
+    const verLen = num();
+    const versionTag = tokens[i++];
+    if (verLen !== versionTag.length) throw new Error('Inconsistent version length');
+
+    const nameLen = num();
+    let name = '';
+    if (nameLen > 0) {
+      name = tokens[i++];
+      if (nameLen !== name.length) {
+        let missing = nameLen - name.length;
+        while (missing > 0 && i < tokens.length) {
+          const next = tokens[i++];
+          name += ' ' + next;
+          missing -= next.length + 1;
+        }
+      }
+    }
+
+    const p0 = num();
+    if (num() !== 0 || num() !== 0) throw new Error('Expected p0 fields not found');
+    const charsLen = num();
+    if (charsLen !== 18) throw new Error('Unexpected characteristics field');
+    const bitset = tokens[i++] || '';
+    const characteristics = bitsetToCharacteristics(bitset);
+    const p3 = num();
+    if (num() !== 0) throw new Error('Expected p4 field not found');
+    const p5 = num();
+    const datalen = num();
+
+    const data = new Uint8Array(datalen);
+    for (let k = 0; k < datalen; k++) data[k] = num() & 0xff;
+    return { versionTag, name, p0, p3, p5, data, characteristics };
+  }
+
+  async function parseMfwz(bytes) {
+    const entries = await readZip(bytes);
+    const e = entries.find((x) => x.name === '0_sample' || x.name.endsWith('/0_sample'));
+    if (!e) throw new Error('.mfwz without 0_sample member');
+    return parseMfw(e.data);
+  }
+
+  async function serializeMfwz(wt) {
+    return writeZip([{ name: '0_sample', data: serializeMfw(wt) }]);
+  }
+
+  // -------------------------------------------------------------------------
+  // Sample: .mfsample = header raw 28 byte + corpo PCM esatto
+  //   (artefatto di recupero lossless documentato da freakout)
+  // -------------------------------------------------------------------------
+
+  function serializeMsample(header, data) {
+    const out = new Uint8Array(header.length + data.length);
+    out.set(header, 0);
+    out.set(data, header.length);
+    return out;
+  }
+
+  function parseMsample(bytes) {
+    if (bytes.length < 28) throw new Error('.mfsample too short');
+    return {
+      header: Uint8Array.from(bytes.subarray(0, 28)),
+      data: Uint8Array.from(bytes.subarray(28)),
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // WAV (RIFF PCM): parser minimale + conversione per wavetable/sample
+  // -------------------------------------------------------------------------
+
+  function parseWav(bytes) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (bytes.length < 44 || bytes[0] !== 0x52 || bytes[1] !== 0x49 || bytes[2] !== 0x46 || bytes[3] !== 0x46) {
+      throw new Error('Not a RIFF/WAV file');
+    }
+    if (bytes[8] !== 0x57 || bytes[9] !== 0x41 || bytes[10] !== 0x56 || bytes[11] !== 0x45) {
+      throw new Error('Not a WAVE file');
+    }
+    let fmt = null;
+    let dataChunk = null;
+    let p = 12;
+    while (p + 8 <= bytes.length) {
+      const id = td.decode(bytes.subarray(p, p + 4));
+      const size = dv.getUint32(p + 4, true);
+      const bodyStart = p + 8;
+      if (id === 'fmt ') {
+        fmt = {
+          format: dv.getUint16(bodyStart, true),
+          channels: dv.getUint16(bodyStart + 2, true),
+          sampleRate: dv.getUint32(bodyStart + 4, true),
+          byteRate: dv.getUint32(bodyStart + 8, true),
+          blockAlign: dv.getUint16(bodyStart + 12, true),
+          bitsPerSample: dv.getUint16(bodyStart + 14, true),
+        };
+      } else if (id === 'data') {
+        dataChunk = bytes.subarray(bodyStart, bodyStart + size);
+        break;
+      }
+      p = bodyStart + size + (size & 1);
+    }
+    if (!fmt || !dataChunk) throw new Error('WAV missing fmt/data chunk');
+    if (fmt.format !== 1) throw new Error('WAV must be uncompressed PCM');
+    if (fmt.bitsPerSample !== 16) throw new Error('WAV must be 16-bit');
+    if (fmt.channels !== 1) throw new Error('WAV must be mono');
+    const frames = Math.floor(dataChunk.length / (fmt.channels * fmt.bitsPerSample / 8));
+    return { sampleRate: fmt.sampleRate, data: dataChunk.subarray(0, frames * 2), frames };
+  }
+
+  /** Risampla linearmente PCM16 mono verso una frequenza target. */
+  function resamplePcm16(data, fromRate, toRate) {
+    if (fromRate === toRate) return data;
+    const outLen = Math.floor((data.length / 2) * toRate / fromRate) * 2;
+    const out = new Uint8Array(outLen);
+    for (let i = 0; i < outLen / 2; i++) {
+      const pos = (i * fromRate) / toRate;
+      const i0 = Math.floor(pos);
+      const i1 = Math.min(i0 + 1, data.length / 2 - 1);
+      const frac = pos - i0;
+      const s0 = data[i0 * 2] | (data[i0 * 2 + 1] << 8);
+      const s1 = data[i1 * 2] | (data[i1 * 2 + 1] << 8);
+      const s = (s0 + (s1 - s0) * frac) | 0;
+      out[i * 2] = s & 0xff;
+      out[i * 2 + 1] = (s >> 8) & 0xff;
+    }
+    return out;
+  }
+
+  /** WAV → wavetable (mono PCM16, 32000 Hz, esattamente 8192 campioni). */
+  function wavToWavetable(bytes, name) {
+    const wav = parseWav(bytes);
+    if (wav.sampleRate !== MFW_WAV_RATE) throw new Error(`Wavetable WAV must be ${MFW_WAV_RATE} Hz (got ${wav.sampleRate})`);
+    if (wav.frames !== MFW_WAV_FRAMES) throw new Error(`Wavetable WAV must contain exactly ${MFW_WAV_FRAMES} samples (got ${wav.frames})`);
+    return { name: (name || 'Wavetable').slice(0, 15), data: wav.data };
+  }
+
+  /** WAV → sample (mono PCM16, risampla a 32 kHz, max 24 s). */
+  function wavToSample(bytes, name) {
+    const wav = parseWav(bytes);
+    const data = resamplePcm16(wav.data, wav.sampleRate, MFW_WAV_RATE);
+    if (data.length < 2) throw new Error('Sample too short');
+    if (data.length > 24 * 32000 * 2) {
+      throw new Error('Sample longer than 24 s at 32 kHz');
+    }
+    return { name: (name || 'Sample').slice(0, 12), data };
+  }
+
   return {
     b64ToBytes,
     bytesToB64,
@@ -452,6 +642,17 @@ const Mfp = (() => {
     serializeMfprojz,
     parseSyx,
     CHARACTERISTICS,
+    MFW_PCM_BYTES,
+    serializeMfw,
+    parseMfw,
+    parseMfwz,
+    serializeMfwz,
+    serializeMsample,
+    parseMsample,
+    parseWav,
+    resamplePcm16,
+    wavToWavetable,
+    wavToSample,
   };
 })();
 

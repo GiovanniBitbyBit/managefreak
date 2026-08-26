@@ -52,6 +52,19 @@ function createWindow() {
           );
           const issues = [];
           if (document.querySelectorAll('.resizer').length !== 3) issues.push('missing resizers (expected 3)');
+          // tab bar: Presets / Wavetables / Samples / Device
+          const tabBtns = Array.from(document.querySelectorAll('#tabs .tab-btn'));
+          if (tabBtns.length !== 4) issues.push('tab buttons missing (expected 4)');
+          else {
+            const idByTab = { presets: 'library-view', wavetables: 'wavetable-view', samples: 'samples-view', device: 'device-view' };
+            for (const btn of tabBtns) {
+              btn.click();
+              const view = document.getElementById(idByTab[btn.dataset.tab]);
+              if (!view || view.classList.contains('hidden')) issues.push('tab view not shown: ' + btn.dataset.tab);
+            }
+            tabBtns[0].click();
+            if (document.getElementById('library-view').classList.contains('hidden')) issues.push('presets view not restored');
+          }
           const libList = document.getElementById('lib-list');
           const catList = document.getElementById('cat-list');
           if (!libList || libList.children.length < 3) issues.push('lib-list not populated');

@@ -44,6 +44,13 @@
     <div class="resizer" data-resize="side" title="Drag to resize"></div>
 
     <section id="content">
+      <div id="tabs" class="tabs">
+        <button class="tab-btn active" data-tab="presets">Presets</button>
+        <button class="tab-btn" data-tab="wavetables">Wavetables</button>
+        <button class="tab-btn" data-tab="samples">Samples</button>
+        <button class="tab-btn" data-tab="device">Device</button>
+      </div>
+
       <div id="content-toolbar">
         <input id="search" type="search" placeholder="Search PC library by name…" />
       </div>
@@ -65,6 +72,63 @@
           </div>
         </div>
         <div id="lib-grid" class="lib-grid"></div>
+      </div>
+
+      <div id="wavetable-view" class="tab-view hidden">
+        <div class="tab-header">
+          <div class="tab-header-row">
+            <h2>Wavetables <span id="wt-count" class="muted"></span></h2>
+            <div class="tab-actions">
+              <button id="btn-wt-read" class="btn small">⬅ Read from MicroFreak</button>
+              <button id="btn-wt-import" class="btn small">Import WAV / .mfw / .mfwz</button>
+              <button id="btn-wt-export-all" class="btn small">⭳ Export all (.mfw)</button>
+            </div>
+          </div>
+          <p class="hint">16 user wavetable slots. Source WAV must be mono PCM16, 32000 Hz,
+             exactly 8192 samples (32 cycles × 256). The MicroFreak uses them with the
+             <strong>WaveUser</strong> oscillator engine.</p>
+        </div>
+        <div id="wt-grid" class="wt-grid"></div>
+      </div>
+
+      <div id="samples-view" class="tab-view hidden">
+        <div class="tab-header">
+          <div class="tab-header-row">
+            <h2>Samples <span id="sm-count" class="muted"></span></h2>
+            <div class="tab-actions">
+              <button id="btn-sm-read" class="btn small">⬅ Read from MicroFreak</button>
+              <button id="btn-sm-import" class="btn small">Import WAV / .mfsample</button>
+              <button id="btn-sm-export-all" class="btn small">⭳ Export all (.mfsample)</button>
+            </div>
+          </div>
+          <div class="sample-stats">
+            <div class="mem-bar"><div id="sm-mem-fill"></div></div>
+            <span id="sm-mem-text" class="muted"></span>
+          </div>
+          <p class="hint">128 sample slots (mono, 32 kHz). Total sample memory:
+             <strong id="sm-cap-text">~3.5 min</strong>. Used by the <strong>Sample</strong>,
+             <strong>Scan Grains</strong>, <strong>Cloud Grains</strong> and
+             <strong>Hit Grains</strong> engines (firmware 5+).</p>
+        </div>
+        <div id="sm-list" class="sm-list"></div>
+      </div>
+
+      <div id="device-view" class="tab-view hidden">
+        <div class="tab-header">
+          <div class="tab-header-row">
+            <h2>Device Settings</h2>
+            <div class="tab-actions">
+              <button id="btn-dev-load" class="btn small">⬅ Load from MicroFreak</button>
+              <button id="btn-dev-apply" class="btn small">➡ Apply changes</button>
+            </div>
+          </div>
+          <p class="hint">Global settings stored on the MicroFreak. Changes are written
+             immediately and verified with a readback.</p>
+        </div>
+        <div id="dev-cols" class="dev-cols">
+          <div id="dev-col-left" class="dev-col"></div>
+          <div id="dev-col-right" class="dev-col"></div>
+        </div>
       </div>
     </section>
 

@@ -25,7 +25,12 @@ const App = (() => {
     search: '',
     deviceSearch: '',
     activePane: 'library', // 'library' | 'device' — per la navigazione con frecce
+    activeTab: 'presets', // 'presets' | 'wavetables' | 'samples' | 'device'
     firmware: null,
+    wavetables: null,      // header dei 16 slot wavetable
+    samples: null,         // header dei 128 slot sample
+    sampleStats: null,     // {usedMs, freeMs, capacityMs, ...}
+    deviceGlobals: null,   // {nomeGlobal: valore}
     busy: false,
     cancelRequested: false,
     dragEntryId: null,
@@ -2198,6 +2203,501 @@ const App = (() => {
     });
   }
 
+  // ------------------------------------------------------------------ tab bar: Wavetables / Samples / Device
+
+  const safeFile = (s) => String(s || 'file').replace(/[\\/:*?"<>|]/g, '_');
+
+  const DEVICE_SETTINGS = [
+    ['midi.channel_in', 'MIDI Input Channel', 'left'],
+    ['midi.channel_out', 'MIDI Output Channel', 'left'],
+    ['midi.output_destination', 'MIDI Output Destination', 'left'],
+    ['midi.local_control', 'Local Control', 'left'],
+    ['midi.arp_seq_notes_out', 'Arp/Seq MIDI Out', 'left'],
+    ['midi.thru', 'MIDI Through', 'left'],
+    ['midi.knob_send_cc', 'Knob Send CCs', 'left'],
+    ['midi.merge', 'MIDI Merge', 'left'],
+    ['clock.source', 'MIDI Clock Source', 'left'],
+    ['clock.sync_port_timing', 'Sync Clock In/Out Settings', 'left'],
+    ['clock.global_tempo', 'Global Tempo', 'left'],
+    ['cv.pitch_format', 'CV Pitch Format', 'left'],
+    ['cv.gate_format', 'CV Gate Format', 'left'],
+    ['cv.press_range', 'CV Press Range', 'left'],
+    ['cv.zero_volt_reference', 'CV 0V Reference', 'left'],
+    ['cv.one_volt_reference', 'CV 1V Reference', 'left'],
+    ['control.knob_catch', 'Knob Catch', 'right'],
+    ['control.click_to_load', 'Click to Load Preset', 'right'],
+    ['control.osc_knob_speed', 'Osc Knob Speed', 'right'],
+    ['control.octave_led_blink', 'Oct LED Blink', 'right'],
+    ['tuning.master', 'Master Tuning', 'right'],
+    ['memory.protection', 'Memory Protection', 'right'],
+    ['keyboard.sensitivity', 'Keyboard Sensitivity', 'right'],
+    ['keyboard.aftertouch_curve', 'Aftertouch Curve', 'right'],
+    ['keyboard.velocity_curve', 'Velocity Curve', 'right'],
+    ['keyboard.relative_bend', 'Relative Bend', 'right'],
+    ['keyboard.scale', 'Scale', 'right'],
+    ['keyboard.root_note', 'Root Note', 'right'],
+    ['microphone.gain', 'Mic Gain', 'right'],
+    ['microphone.noise_gate', 'Noise Gate', 'right'],
+    ['microphone.detect', 'Mic Detection', 'right'],
+  ];
+
+  const fmtMs = (ms) => {
+    const totalSec = Math.max(0, Math.round(ms / 1000));
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  };
+
+  function switchTab(tab) {
+    state.activeTab = tab;
+    document.querySelectorAll('#tabs .tab-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.tab === tab);
+    });
+    const content = document.getElementById('content');
+    const layout = document.getElementById('layout');
+    for (const t of ['wavetables', 'samples', 'device']) {
+      content.classList.toggle('tab-' + t, tab === t);
+      layout.classList.toggle('tab-' + t, tab === t);
+    }
+    const views = { presets: 'library-view', wavetables: 'wavetable-view', samples: 'samples-view', device: 'device-view' };
+    for (const [t, id] of Object.entries(views)) {
+      $('' + id).classList.toggle('hidden', t !== tab);
+    }
+    if (tab === 'wavetables' && !state.wavetables && Midi.isOpen()) readWavetableInventory();
+    if (tab === 'samples' && !state.samples && Midi.isOpen()) readSampleInventory();
+    if (tab === 'device' && !state.deviceGlobals && Midi.isOpen()) loadDeviceGlobals();
+  }
+
+  // ---------------------------------------------------------------- wavetables
+
+  async function readWavetableInventory() {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    setBusy(true, 'Reading wavetable slots…');
+    try {
+      const out = [];
+      for (let s = 1; s <= MF.WAVE_SLOTS; s++) out.push(await MF.readWavetableHeader(s));
+      state.wavetables = out;
+      renderWavetables();
+      toast('Wavetable directory loaded ✓', 'ok');
+    } catch (e) {
+      toast('Wavetable read failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function renderWavetables() {
+    const grid = $('wt-grid');
+    if (!grid) return;
+    const list = state.wavetables || [];
+    const occ = list.filter((h) => h && !h.empty).length;
+    const count = $('wt-count');
+    if (count) count.textContent = `(${occ}/16 used)`;
+    grid.innerHTML = list.map((h, i) => {
+      const slot = i + 1;
+      const empty = !h || h.empty;
+      return `<div class="wt-card ${empty ? 'empty' : ''}" data-slot="${slot}">
+        <span class="wt-num">Slot ${slot}</span>
+        <span class="wt-name">${empty ? '(empty)' : esc(h.name)}</span>
+        <div class="wt-actions">
+          ${empty ? '' : `<button class="btn small" data-wt="dl" title="Download .mfw">⭳</button>
+          <button class="btn small" data-wt="clear" title="Clear slot">✕</button>`}
+          <button class="btn small" data-wt="up" title="Upload WAV / .mfw / .mfwz">➡</button>
+        </div>
+      </div>`;
+    }).join('');
+    grid.querySelectorAll('[data-wt]').forEach((btn) => {
+      const slot = parseInt(btn.closest('.wt-card').dataset.slot, 10);
+      btn.addEventListener('click', () => {
+        const act = btn.dataset.wt;
+        if (act === 'dl') readWavetableToPC(slot);
+        else if (act === 'up') importWavetableIntoSlot(slot);
+        else if (act === 'clear') clearWavetableSlot(slot);
+      });
+    });
+  }
+
+  async function readWavetableToPC(slot) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    setBusy(true, `Reading wavetable slot ${slot}…`);
+    try {
+      const wt = await MF.readWavetable(slot);
+      if (!wt.data) return toast(`Wavetable slot ${slot} is empty.`, 'err');
+      const bytes = Mfp.serializeMfw({ name: wt.name, data: wt.data });
+      await window.mfapi.saveFile({
+        defaultName: `${safeFile(wt.name)}.mfw`,
+        data: Mfp.bytesToB64(bytes),
+        filters: [{ name: 'MicroFreak wavetable', extensions: ['mfw'] }],
+      });
+    } catch (e) {
+      toast('Wavetable read failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importWavetableIntoSlot(slot) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    let target = slot;
+    if (target === null || target === undefined) {
+      const free = (state.wavetables || []).findIndex((h) => !h || h.empty);
+      if (free < 0) return toast('No free wavetable slots.', 'err');
+      target = free + 1;
+    }
+    const files = await window.mfapi.openFiles({
+      filters: [
+        { name: 'WAV / .mfw / .mfwz', extensions: ['wav', 'mfw', 'mfwz'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (!files || !files.length) return;
+    const f = files[0];
+    const bytes = Mfp.b64ToBytes(f.data);
+    const ext = f.name.split('.').pop().toLowerCase();
+    let wt;
+    try {
+      if (ext === 'wav') wt = Mfp.wavToWavetable(bytes, f.name.replace(/\.[^.]+$/, ''));
+      else if (ext === 'mfw') wt = Mfp.parseMfw(bytes);
+      else if (ext === 'mfwz') wt = await Mfp.parseMfwz(bytes);
+      else throw new Error('Unsupported extension: .' + ext);
+    } catch (e) {
+      return toast('Import failed: ' + (e.message || e), 'err', 6000);
+    }
+    setBusy(true, `Uploading wavetable to slot ${target}…`);
+    try {
+      await MF.writeWavetable(target, { name: wt.name || 'Wavetable', data: wt.data });
+      if (state.wavetables) state.wavetables[target - 1] = await MF.readWavetableHeader(target);
+      renderWavetables();
+      toast(`Wavetable "${wt.name || 'Wavetable'}" written to slot ${target} ✓`, 'ok');
+    } catch (e) {
+      toast('Wavetable upload failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearWavetableSlot(slot) {
+    const ok = await showModal('Clear wavetable slot',
+      `<p>Clear slot ${slot}? The wavetable will be removed from the MicroFreak.</p>`,
+      { okLabel: 'Clear' });
+    if (!ok) return;
+    setBusy(true, `Clearing wavetable slot ${slot}…`);
+    try {
+      await MF.clearWavetable(slot);
+      if (state.wavetables) state.wavetables[slot - 1] = await MF.readWavetableHeader(slot);
+      renderWavetables();
+      toast(`Wavetable slot ${slot} cleared ✓`, 'ok');
+    } catch (e) {
+      toast('Wavetable clear failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportAllWavetables() {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    if (!state.wavetables) await readWavetableInventory();
+    const occupied = (state.wavetables || []).map((h, i) => h && !h.empty ? i + 1 : null).filter(Boolean);
+    if (!occupied.length) return toast('No wavetables to export.', 'err');
+    setBusy(true, 'Reading wavetables…');
+    try {
+      const files = [];
+      for (const slot of occupied) {
+        const wt = await MF.readWavetable(slot);
+        if (wt.data) {
+          files.push({
+            name: `${String(slot).padStart(2, '0')}-${safeFile(wt.name)}.mfw`,
+            dataB64: Mfp.bytesToB64(Mfp.serializeMfw({ name: wt.name, data: wt.data })),
+          });
+        }
+      }
+      const dir = await window.mfapi.exportFolder(files);
+      if (dir) toast(`Exported ${files.length} wavetables to ${dir}`, 'ok');
+    } catch (e) {
+      toast('Wavetable export failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ---------------------------------------------------------------- samples
+
+  async function readSampleInventory() {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    setBusy(true, 'Reading sample directory…');
+    try {
+      const out = [];
+      for (let s = 1; s <= MF.SAMPLE_SLOTS; s++) out.push(await MF.readSampleHeader(s));
+      state.samples = out;
+      try {
+        state.sampleStats = await MF.readSampleStats();
+      } catch {
+        state.sampleStats = null;
+      }
+      renderSamples();
+      toast('Sample directory loaded ✓', 'ok');
+    } catch (e) {
+      toast('Sample read failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function renderSamples() {
+    const list = $('sm-list');
+    if (!list) return;
+    const items = state.samples || [];
+    const occ = items.filter((h) => h && !h.empty).length;
+    const count = $('sm-count');
+    if (count) count.textContent = `(${occ}/128 used)`;
+    const stats = state.sampleStats;
+    if (stats) {
+      const fill = $('sm-mem-fill');
+      if (fill) fill.style.width = `${Math.min(100, (stats.usedMs / stats.capacityMs) * 100)}%`;
+      const txt = $('sm-mem-text');
+      if (txt) txt.textContent = `Used ${fmtMs(stats.usedMs)} / ${fmtMs(stats.capacityMs)} · free ${fmtMs(stats.freeMs)}`;
+    }
+    list.innerHTML = items.map((h, i) => {
+      const slot = i + 1;
+      const empty = !h || h.empty;
+      const timeMs = h && h.sizeBytes ? h.sizeBytes / 64 : 0;
+      return `<div class="sm-row ${empty ? 'empty' : ''}" data-slot="${slot}">
+        <span class="sm-num">${slot}</span>
+        <span class="sm-name">${empty ? '(empty)' : esc(h.name)}</span>
+        <span class="sm-time">${empty ? '' : `${fmtMs(timeMs)} · ${(h.sizeBytes / 1024).toFixed(0)} KB`}</span>
+        <span class="sm-cksum">${empty ? '' : '#' + h.checksum.toString(16).padStart(4, '0')}</span>
+        <span class="sm-actions">
+          ${empty ? '' : `<button class="btn small" data-sm="dl" title="Download .mfsample">⭳</button>
+          <button class="btn small" data-sm="clear" title="Clear slot">✕</button>`}
+          <button class="btn small" data-sm="up" title="Upload WAV / .mfsample">➡</button>
+        </span>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('[data-sm]').forEach((btn) => {
+      const slot = parseInt(btn.closest('.sm-row').dataset.slot, 10);
+      btn.addEventListener('click', () => {
+        const act = btn.dataset.sm;
+        if (act === 'dl') readSampleToPC(slot);
+        else if (act === 'up') importSampleIntoSlot(slot);
+        else if (act === 'clear') clearSampleSlot(slot);
+      });
+    });
+  }
+
+  async function readSampleToPC(slot) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    setBusy(true, `Reading sample slot ${slot}…`);
+    try {
+      const s = await MF.readSample(slot);
+      if (!s.data) return toast(`Sample slot ${slot} is empty.`, 'err');
+      const bytes = Mfp.serializeMsample(s.raw, s.data);
+      await window.mfapi.saveFile({
+        defaultName: `${String(slot).padStart(3, '0')}-${safeFile(s.name)}.mfsample`,
+        data: Mfp.bytesToB64(bytes),
+        filters: [{ name: 'MicroFreak sample backup', extensions: ['mfsample'] }],
+      });
+    } catch (e) {
+      toast('Sample read failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importSampleIntoSlot(slot) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    let target = slot;
+    if (target === null || target === undefined) {
+      const free = (state.samples || []).findIndex((h) => !h || h.empty);
+      if (free < 0) return toast('No free sample slots.', 'err');
+      target = free + 1;
+    }
+    const files = await window.mfapi.openFiles({
+      filters: [
+        { name: 'WAV / .mfsample', extensions: ['wav', 'mfsample'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (!files || !files.length) return;
+    const f = files[0];
+    const bytes = Mfp.b64ToBytes(f.data);
+    const ext = f.name.split('.').pop().toLowerCase();
+    let name;
+    let data;
+    try {
+      if (ext === 'wav') {
+        const s = Mfp.wavToSample(bytes, f.name.replace(/\.[^.]+$/, ''));
+        name = s.name;
+        data = s.data;
+      } else if (ext === 'mfsample') {
+        const m = Mfp.parseMsample(bytes);
+        name = (m.header && Array.from(m.header.subarray(10, 22)).filter((c) => c > 0).map((c) => String.fromCharCode(c)).join('')) || 'Sample';
+        data = m.data;
+        if (data.length < 2 || data.length > MF.SAMPLE_MAX_BYTES) {
+          throw new Error('Sample must be 2..' + MF.SAMPLE_MAX_BYTES + ' bytes');
+        }
+      } else {
+        throw new Error('Unsupported extension: .' + ext);
+      }
+    } catch (e) {
+      return toast('Import failed: ' + (e.message || e), 'err', 6000);
+    }
+    setBusy(true, `Uploading sample to slot ${target}…`);
+    try {
+      await MF.writeSample(target, name, data);
+      if (state.samples) state.samples[target - 1] = await MF.readSampleHeader(target);
+      try {
+        state.sampleStats = await MF.readSampleStats();
+      } catch {
+        /* stats non disponibili */
+      }
+      renderSamples();
+      toast(`Sample "${name}" written to slot ${target} ✓`, 'ok');
+    } catch (e) {
+      toast('Sample upload failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearSampleSlot(slot) {
+    const ok = await showModal('Clear sample slot',
+      `<p>Clear slot ${slot}? The sample will be removed from the MicroFreak memory.</p>`,
+      { okLabel: 'Clear' });
+    if (!ok) return;
+    setBusy(true, `Clearing sample slot ${slot}…`);
+    try {
+      await MF.clearSample(slot);
+      if (state.samples) state.samples[slot - 1] = await MF.readSampleHeader(slot);
+      try {
+        state.sampleStats = await MF.readSampleStats();
+      } catch {
+        /* stats non disponibili */
+      }
+      renderSamples();
+      toast(`Sample slot ${slot} cleared ✓`, 'ok');
+    } catch (e) {
+      toast('Sample clear failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportAllSamples() {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    if (!state.samples) await readSampleInventory();
+    const occupied = (state.samples || []).map((h, i) => h && !h.empty ? i + 1 : null).filter(Boolean);
+    if (!occupied.length) return toast('No samples to export.', 'err');
+    setBusy(true, 'Reading samples…');
+    try {
+      const files = [];
+      for (const slot of occupied) {
+        const s = await MF.readSample(slot);
+        if (s.data) {
+          files.push({
+            name: `${String(slot).padStart(3, '0')}-${safeFile(s.name)}.mfsample`,
+            dataB64: Mfp.bytesToB64(Mfp.serializeMsample(s.raw, s.data)),
+          });
+        }
+      }
+      const dir = await window.mfapi.exportFolder(files);
+      if (dir) toast(`Exported ${files.length} samples to ${dir}`, 'ok');
+    } catch (e) {
+      toast('Sample export failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ---------------------------------------------------------------- device settings
+
+  function renderDeviceView(values) {
+    const left = $('dev-col-left');
+    const right = $('dev-col-right');
+    const build = (col) => DEVICE_SETTINGS.filter(([, , c]) => c === col).map(([name, label]) => {
+      const spec = MF.GLOBAL_SPECS[name];
+      if (!spec) return '';
+      const cur = values ? values[name] : null;
+      const opts = spec.values.map((v) =>
+        `<option value="${v}" ${cur === v ? 'selected' : ''}>${esc(spec.label(v))}</option>`).join('');
+      return `<div class="dev-row" data-global="${name}">
+        <label title="${name}">${label}</label>
+        <select data-global="${name}">${opts}</select>
+      </div>`;
+    }).join('');
+    left.innerHTML = build('left');
+    right.innerHTML = build('right');
+    document.querySelectorAll('#dev-cols select[data-global]').forEach((sel) => {
+      sel.addEventListener('change', () => applyGlobal(sel.dataset.global, parseInt(sel.value, 10), sel));
+    });
+  }
+
+  async function loadDeviceGlobals() {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    setBusy(true, 'Reading device settings…');
+    try {
+      const codes = DEVICE_SETTINGS.map(([name]) => MF.GLOBAL_CODES[name]);
+      const raw = await MF.readGlobalCodes(codes);
+      const values = {};
+      DEVICE_SETTINGS.forEach(([name], i) => { values[name] = raw[codes[i]]; });
+      state.deviceGlobals = values;
+      renderDeviceView(values);
+      toast('Device settings loaded ✓', 'ok');
+    } catch (e) {
+      toast('Device settings read failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyGlobal(name, value, sel) {
+    try {
+      await MF.writeGlobalSetting(name, value);
+      if (state.deviceGlobals) state.deviceGlobals[name] = value;
+      sel.classList.remove('dirty');
+      toast(`${name} set to ${MF.globalLabel(name, value)} ✓`, 'ok');
+    } catch (e) {
+      toast('Setting failed: ' + (e.message || e), 'err', 6000);
+      try {
+        const v = await MF.readGlobalCode(MF.GLOBAL_CODES[name]);
+        sel.value = String(v);
+        sel.classList.remove('dirty');
+      } catch {
+        /* mantieni il valore corrente */
+      }
+    }
+  }
+
+  async function applyAllDeviceGlobals() {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    const selects = Array.from(document.querySelectorAll('#dev-cols select[data-global]'));
+    if (!selects.length) return;
+    setBusy(true, 'Applying device settings…');
+    let done = 0;
+    let failed = 0;
+    try {
+      for (const sel of selects) {
+        const name = sel.dataset.global;
+        const value = parseInt(sel.value, 10);
+        const current = state.deviceGlobals ? state.deviceGlobals[name] : null;
+        if (current !== null && current !== value) {
+          try {
+            await MF.writeGlobalSetting(name, value);
+            if (state.deviceGlobals) state.deviceGlobals[name] = value;
+            sel.classList.remove('dirty');
+          } catch {
+            failed++;
+          }
+        }
+        done++;
+        setProgress(done / selects.length, `Setting ${name}…`);
+      }
+      toast(`Applied ${done - failed} of ${done} settings${failed ? `, ${failed} failed` : ''} ✓`, 'ok', 6000);
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }
+
   // ------------------------------------------------------------------ init
 
   async function init() {
@@ -2258,6 +2758,19 @@ const App = (() => {
       state.search = el.search.value;
       renderLibrary();
     });
+
+    // tab Presets / Wavetables / Samples / Device
+    document.querySelectorAll('#tabs .tab-btn').forEach((b) => {
+      b.addEventListener('click', () => switchTab(b.dataset.tab));
+    });
+    $('btn-wt-read').addEventListener('click', readWavetableInventory);
+    $('btn-wt-import').addEventListener('click', () => importWavetableIntoSlot(null));
+    $('btn-wt-export-all').addEventListener('click', exportAllWavetables);
+    $('btn-sm-read').addEventListener('click', readSampleInventory);
+    $('btn-sm-import').addEventListener('click', () => importSampleIntoSlot(null));
+    $('btn-sm-export-all').addEventListener('click', exportAllSamples);
+    $('btn-dev-load').addEventListener('click', loadDeviceGlobals);
+    $('btn-dev-apply').addEventListener('click', applyAllDeviceGlobals);
 
     initResizers();
 
@@ -2426,6 +2939,8 @@ const App = (() => {
     document.addEventListener('keydown', (e) => {
       const ae = document.activeElement;
       const typing = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
+      // le scorciatoie da tastiera valgono solo nella vista Presets
+      if (state.activeTab !== 'presets') return;
       if (e.key === 'Escape') {
         if (state.selLib.size && !typing) clearSelection();
         return;
