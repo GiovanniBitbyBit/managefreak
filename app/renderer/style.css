@@ -1013,14 +1013,18 @@ select {
 }
 #wt-detail-canvas {
   width: 100%;
+  max-width: 360px;
   height: auto;
   display: block;
+  margin: 0 auto;
   background: transparent;
 }
 #sm-detail-wave {
   width: 100%;
+  max-width: 360px;
   height: auto;
   display: block;
+  margin: 0 auto;
   background: transparent;
 }
 .cycle-slider-small {
