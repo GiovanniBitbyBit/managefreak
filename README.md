@@ -44,6 +44,21 @@ of Arturia MCC files (`.mfp`, `.mbp`, `.mfpz`, `.mfprojz`, `.syx`).
 - **Parameter view** of the preset (oscillator type, cutoff, resonance, envelopes, LFO, arp,
   modulation matrix…), decoded from the firmware-5 tagged format.
 
+### Tabs (MCC-style)
+- **Wavetables**: 16 user wavetable slots on the device, split view (PC library ↔ MicroFreak).
+  Import `.wav` (mono PCM16, 32 kHz, exactly 8192 samples), `.mfw`, `.mfwz`; download
+  `.mfw`/`.mfwz`; clear slots; drag & drop both ways; **visual preview** of the selected
+  wavetable (perspective ribbon of the 32 cycles, with a cycle slider), like Arturia MCC.
+- **Samples**: 128 sample slots (firmware 5+) with a **memory time counter**
+  (total ~3.5 min); split view (PC library ↔ MicroFreak). Import `.wav` (mono, resampled to
+  32 kHz, max 24 s) and `.mfsample` backups; download; clear; drag & drop both ways;
+  waveform preview in the details pane.
+- **Device**: 31 global settings (MIDI channels, clock, CV, knob behavior, tuning,
+  keyboard, microphone…) with the **audited allowed values** from Arturia's device
+  description; changes are written with readback verification and automatic rollback.
+- A **details pane** at the bottom shows name/source/size for the clicked preset,
+  wavetable or sample, with inline **rename** (on the device or in the PC library).
+
 ---
 
 ## Requirements

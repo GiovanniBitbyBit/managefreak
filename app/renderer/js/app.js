@@ -34,7 +34,9 @@ const App = (() => {
     wtLib: [],             // libreria PC wavetable: [{id, name, dataB64, addedAt, source}]
     smLib: [],             // libreria PC sample: [{id, name, dataB64, sizeBytes, durationMs, ...}]
     wtData: {},            // cache corpi wavetable letti dal dispositivo: slot → {name, data}
+    smData: {},            // cache corpi sample letti dal dispositivo: slot → {name, sizeBytes, checksum, data}
     wtLastRender: null,    // {data, name, slot} ultima wavetable renderizzata
+    smLastRender: null,    // {slot, libId} ultimo sample mostrato nel dettaglio
     busy: false,
     cancelRequested: false,
     dragEntryId: null,
@@ -1727,9 +1729,12 @@ const App = (() => {
     el.detail.classList.add('hidden');
   }
 
-  function renderDetail({ name, metaRows, tags, tagInput, notes, actions, params, onRemoveTag, extraHtml, onRename }) {
+  function renderDetail({ name, metaRows, tags, tagInput, notes, actions, params, onRemoveTag, extraHtml, onRename, hideParams = false }) {
     el.detailEmpty.classList.add('hidden');
     el.detail.classList.remove('hidden');
+    const paramsTitle = document.getElementById('detail-params-title');
+    if (paramsTitle) paramsTitle.classList.toggle('hidden', hideParams);
+    el.detailParams.classList.toggle('hidden', hideParams);
     el.detailName.innerHTML = '';
     el.detailName.appendChild(document.createTextNode(name));
     if (onRename) {
@@ -2280,14 +2285,22 @@ const App = (() => {
     if (tab === 'wavetables') {
       renderWavetableSidebar();
       renderWavetablePc();
+      showDetailEmpty();
       if (!state.wavetables && Midi.isOpen()) readWavetableInventory();
     }
     if (tab === 'samples') {
       renderSampleSidebar();
       renderSamplePc();
+      showDetailEmpty();
       if (!state.samples && Midi.isOpen()) readSampleInventory();
     }
     if (tab === 'device' && !state.deviceGlobals && Midi.isOpen()) loadDeviceGlobals();
+    if (tab === 'presets') {
+      const ids = selIds();
+      if (ids.length === 1) showLibraryDetail(ids[0]);
+      else if (ids.length > 1) showMultiDetail(ids);
+      else showDetailEmpty();
+    }
   }
 
   // ---------------------------------------------------------------- wavetables
@@ -2564,6 +2577,10 @@ const App = (() => {
     // drag&drop: PC → dispositivo (upload) e dispositivo → PC (archivia)
     list.querySelectorAll('.sm-row').forEach((row) => {
       const slot = parseInt(row.dataset.slot, 10);
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        selectSample(slot);
+      });
       const h = items[slot - 1];
       if (h && !h.empty) {
         row.draggable = true;
@@ -2671,6 +2688,7 @@ const App = (() => {
     setBusy(true, `Uploading sample to slot ${target}…`);
     try {
       await MF.writeSample(target, name, data);
+      delete state.smData[target];
       if (state.samples) state.samples[target - 1] = await MF.readSampleHeader(target);
       try {
         state.sampleStats = await MF.readSampleStats();
@@ -2678,6 +2696,7 @@ const App = (() => {
         /* stats non disponibili */
       }
       renderSamples();
+      if (state.smLastRender && state.smLastRender.slot === target) selectSample(target);
       toast(`Sample "${name}" written to slot ${target} ✓`, 'ok');
     } catch (e) {
       toast('Sample upload failed: ' + (e.message || e), 'err', 6000);
@@ -2694,6 +2713,7 @@ const App = (() => {
     setBusy(true, `Clearing sample slot ${slot}…`);
     try {
       await MF.clearSample(slot);
+      delete state.smData[slot];
       if (state.samples) state.samples[slot - 1] = await MF.readSampleHeader(slot);
       try {
         state.sampleStats = await MF.readSampleStats();
@@ -2701,6 +2721,7 @@ const App = (() => {
         /* stats non disponibili */
       }
       renderSamples();
+      if (state.smLastRender && state.smLastRender.slot === slot) selectSample(slot);
       toast(`Sample slot ${slot} cleared ✓`, 'ok');
     } catch (e) {
       toast('Sample clear failed: ' + (e.message || e), 'err', 6000);
@@ -2874,23 +2895,133 @@ const App = (() => {
     }
   }
 
-  function showWtRender(data, title, slot) {
-    const panel = $('wt-render');
-    if (!panel) return;
-    panel.classList.remove('hidden');
-    const titleEl = $('wt-render-title');
-    if (titleEl) {
-      titleEl.textContent = title
-        ? `Wavetable "${title}"${slot ? ` — MicroFreak slot ${slot}` : ''}`
-        : '—';
+  function drawSampleWave(canvas, data) {
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    if (!data || data.length < 4) {
+      ctx.fillStyle = '#8a8a9a';
+      ctx.font = '12px sans-serif';
+      ctx.fillText('No sample data', 12, 20);
+      return;
     }
-    const slider = $('wt-cycle');
-    const hl = slider ? (parseInt(slider.value, 10) - 1) : 0;
-    drawWavetable($('wt-canvas'), data, hl);
-    state.wtLastRender = { data, name: title, slot: slot || null };
+    const mid = H / 2;
+    const px = Math.max(1, Math.floor(data.length / 2 / W));
+    ctx.beginPath();
+    for (let x = 0; x < W; x++) {
+      let mn = 32767;
+      let mx = -32768;
+      const start = Math.min(data.length - 1, x * px * 2);
+      const end = Math.min(data.length - 1, start + px * 2);
+      for (let i = start; i < end; i += 2) {
+        const s = (data[i] | (data[i + 1] << 8)) << 16 >> 16;
+        if (s < mn) mn = s;
+        if (s > mx) mx = s;
+      }
+      const y0 = mid - (mx / 32768) * (H * 0.45);
+      const y1 = mid - (mn / 32768) * (H * 0.45);
+      ctx.moveTo(x, y0);
+      ctx.lineTo(x, y1);
+    }
+    ctx.strokeStyle = 'rgba(96, 210, 160, 0.9)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
 
-  /** Seleziona uno slot wavetable del dispositivo e ne mostra il render. */
+  /** Dettagli wavetable nel pannello in basso (con render piccolo e rename). */
+  function showWtDetail({ name, data, slot, libId, source }) {
+    state.wtLastRender = { data, name, slot: slot || null, libId: libId || null };
+    const actions = [];
+    if (slot) {
+      actions.push({ id: 'dl', label: '⭳ Download .mfw', run: () => readWavetableToPC(slot) });
+      actions.push({ id: 'clear', label: '✕ Clear', run: () => clearWavetableSlot(slot).then(() => showDetailEmpty()) });
+    } else if (libId) {
+      actions.push({ id: 'dl', label: '⭳ Download .mfw', run: () => downloadWavetableEntry(libId) });
+      actions.push({ id: 'send', label: '➡ Send to MicroFreak', run: () => sendWavetableToDevice(libId) });
+      actions.push({ id: 'del', label: '✕ Remove from PC', run: () => { deleteWavetableFromLib(libId); showDetailEmpty(); } });
+    }
+    renderDetail({
+      name,
+      metaRows: [
+        ['Source', source || '—'],
+        ['Size', '16 KB (32 cycles × 256 × 16-bit)'],
+      ],
+      tags: [],
+      tagInput: null,
+      notes: null,
+      actions,
+      params: [],
+      hideParams: true,
+      extraHtml: `<div class="detail-render-box">
+        <div class="render-head">
+          <span>Wavetable preview</span>
+          <label class="cycle-slider-small">Cycle
+            <input id="wt-detail-cycle" type="range" min="1" max="32" value="1" />
+            <span id="wt-detail-cycle-val">1</span>/32
+          </label>
+        </div>
+        <canvas id="wt-detail-canvas" width="420" height="110"></canvas>
+      </div>`,
+      onRename: (newName) => {
+        if (slot) renameWavetableDetail(slot, newName);
+        else if (libId) renameWavetableLibEntry(libId, newName);
+      },
+    });
+    const canvas = $('wt-detail-canvas');
+    if (canvas) {
+      drawWavetable(canvas, data, 0);
+      const slider = $('wt-detail-cycle');
+      if (slider) {
+        slider.addEventListener('input', () => {
+          const val = $('wt-detail-cycle-val');
+          if (val) val.textContent = slider.value;
+          drawWavetable(canvas, data, parseInt(slider.value, 10) - 1);
+        });
+      }
+    }
+  }
+
+  /** Dettagli sample nel pannello in basso (con forma d'onda e rename). */
+  function showSmDetail({ name, data, slot, libId, source, sizeBytes, durationMs, checksum }) {
+    state.smLastRender = { slot: slot || null, libId: libId || null };
+    const actions = [];
+    if (slot) {
+      actions.push({ id: 'dl', label: '⭳ Download .mfsample', run: () => readSampleToPC(slot) });
+      actions.push({ id: 'clear', label: '✕ Clear', run: () => clearSampleSlot(slot).then(() => showDetailEmpty()) });
+    } else if (libId) {
+      actions.push({ id: 'dl', label: '⭳ Download .mfsample', run: () => downloadSampleEntry(libId) });
+      actions.push({ id: 'send', label: '➡ Send to MicroFreak', run: () => sendSampleToDevice(libId) });
+      actions.push({ id: 'del', label: '✕ Remove from PC', run: () => { deleteSampleFromLib(libId); showDetailEmpty(); } });
+    }
+    renderDetail({
+      name,
+      metaRows: [
+        ['Source', source || '—'],
+        ['Size', `${sizeBytes ? (sizeBytes / 1024).toFixed(1) : 0} KB`],
+        ['Duration', durationMs ? fmtMs(durationMs) : '—'],
+        ...(checksum !== undefined && checksum !== null ? [['Checksum', '#' + checksum.toString(16).padStart(4, '0')]] : []),
+      ],
+      tags: [],
+      tagInput: null,
+      notes: null,
+      actions,
+      params: [],
+      hideParams: true,
+      extraHtml: `<div class="detail-render-box">
+        <div class="render-head"><span>Sample preview</span></div>
+        <canvas id="sm-detail-wave" width="420" height="110"></canvas>
+      </div>`,
+      onRename: (newName) => {
+        if (slot) renameSampleDetail(slot, newName);
+        else if (libId) renameSampleLibEntry(libId, newName);
+      },
+    });
+    const wave = $('sm-detail-wave');
+    if (wave) drawSampleWave(wave, data);
+  }
+
+  /** Seleziona uno slot wavetable del dispositivo e mostra i dettagli. */
   async function selectWavetable(slot) {
     document.querySelectorAll('#wt-list .wt-row').forEach((r) => {
       r.classList.toggle('selected', parseInt(r.dataset.slot, 10) === slot);
@@ -2901,7 +3032,7 @@ const App = (() => {
       try {
         const wt = await MF.readWavetable(slot);
         if (!wt.data) {
-          showWtRender(null, `Slot ${slot} is empty`, slot);
+          showDetailEmpty();
           return;
         }
         cached = { name: wt.name, data: wt.data };
@@ -2913,17 +3044,134 @@ const App = (() => {
         setBusy(false);
       }
     }
-    showWtRender(cached.data, cached.name, slot);
+    showWtDetail({ name: cached.name, data: cached.data, slot, source: `MicroFreak slot ${slot}` });
   }
 
-  /** Render di una wavetable della libreria PC (senza dispositivo). */
+  /** Dettagli di una wavetable della libreria PC (senza dispositivo). */
   function renderWavetableFromLib(id) {
     const entry = state.wtLib.find((e) => e.id === id);
     if (!entry) return;
     document.querySelectorAll('#wt-pc-list .pc-item').forEach((item) => {
       item.classList.toggle('selected', parseInt(item.dataset.id, 10) === id);
     });
-    showWtRender(Mfp.b64ToBytes(entry.dataB64), entry.name, null);
+    showWtDetail({ name: entry.name, data: Mfp.b64ToBytes(entry.dataB64), libId: id, source: entry.source || 'PC library' });
+  }
+
+  /** Seleziona uno slot sample del dispositivo e mostra i dettagli. */
+  async function selectSample(slot) {
+    document.querySelectorAll('#sm-list .sm-row').forEach((r) => {
+      r.classList.toggle('selected', parseInt(r.dataset.slot, 10) === slot);
+    });
+    let cached = state.smData[slot];
+    if (!cached) {
+      setBusy(true, `Reading sample slot ${slot}…`);
+      try {
+        const s = await MF.readSample(slot);
+        if (!s.data) {
+          showDetailEmpty();
+          return;
+        }
+        cached = { name: s.name, sizeBytes: s.sizeBytes, checksum: s.checksum, data: s.data };
+        state.smData[slot] = cached;
+      } catch (e) {
+        toast('Sample read failed: ' + (e.message || e), 'err', 6000);
+        return;
+      } finally {
+        setBusy(false);
+      }
+    }
+    showSmDetail({
+      name: cached.name,
+      data: cached.data,
+      slot,
+      source: `MicroFreak slot ${slot}`,
+      sizeBytes: cached.sizeBytes,
+      durationMs: Math.round((cached.sizeBytes / 2 / 32000) * 1000),
+      checksum: cached.checksum,
+    });
+  }
+
+  /** Dettagli di un sample della libreria PC. */
+  function renderSampleFromLib(id) {
+    const entry = state.smLib.find((e) => e.id === id);
+    if (!entry) return;
+    document.querySelectorAll('#sm-pc-list .pc-item').forEach((item) => {
+      item.classList.toggle('selected', parseInt(item.dataset.id, 10) === id);
+    });
+    showSmDetail({
+      name: entry.name,
+      data: Mfp.b64ToBytes(entry.dataB64),
+      libId: id,
+      source: entry.source || 'PC library',
+      sizeBytes: entry.sizeBytes,
+      durationMs: entry.durationMs,
+    });
+  }
+
+  async function renameWavetableDetail(slot, newName) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    setBusy(true, `Renaming wavetable slot ${slot}…`);
+    try {
+      let cached = state.wtData[slot];
+      if (!cached) {
+        const wt = await MF.readWavetable(slot);
+        if (!wt.data) throw new Error(`Wavetable slot ${slot} is empty`);
+        cached = { name: wt.name, data: wt.data };
+      }
+      await MF.writeWavetable(slot, { name: (newName || 'Wavetable').slice(0, 15), data: cached.data });
+      delete state.wtData[slot];
+      if (state.wavetables) state.wavetables[slot - 1] = await MF.readWavetableHeader(slot);
+      renderWavetables();
+      selectWavetable(slot);
+      toast(`Wavetable renamed to "${newName}" ✓`, 'ok');
+    } catch (e) {
+      toast('Rename failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function renameWavetableLibEntry(id, newName) {
+    const entry = state.wtLib.find((e) => e.id === id);
+    if (!entry) return;
+    entry.name = (newName || 'Wavetable').slice(0, 15);
+    saveWavetableLib();
+    renderWavetableSidebar();
+    renderWavetablePc();
+    renderWavetableFromLib(id);
+  }
+
+  async function renameSampleDetail(slot, newName) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    setBusy(true, `Renaming sample slot ${slot}…`);
+    try {
+      let cached = state.smData[slot];
+      if (!cached) {
+        const s = await MF.readSample(slot);
+        if (!s.data) throw new Error(`Sample slot ${slot} is empty`);
+        cached = { name: s.name, sizeBytes: s.sizeBytes, checksum: s.checksum, data: s.data };
+      }
+      await MF.writeSample(slot, (newName || 'Sample').slice(0, 12), cached.data);
+      delete state.smData[slot];
+      if (state.samples) state.samples[slot - 1] = await MF.readSampleHeader(slot);
+      renderSamples();
+      selectSample(slot);
+      toast(`Sample renamed to "${newName}" ✓`, 'ok');
+    } catch (e) {
+      toast('Rename failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function renameSampleLibEntry(id, newName) {
+    const entry = state.smLib.find((e) => e.id === id);
+    if (!entry) return;
+    entry.name = (newName || 'Sample').slice(0, 12);
+    saveSampleLib();
+    renderSampleSidebar();
+    renderSamplePc();
+    renderSampleFromLib(id);
   }
 
   // ------------------------------------------------------------------ librerie PC: wavetable e sample
@@ -3058,6 +3306,10 @@ const App = (() => {
          or drag a device slot here.</div>`;
     list.querySelectorAll('.pc-item').forEach((item) => {
       const id = parseInt(item.dataset.id, 10);
+      item.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        renderSampleFromLib(id);
+      });
       item.addEventListener('dragstart', (e) => {
         e.dataTransfer.setData('application/x-managefreak-sm', String(id));
         e.dataTransfer.setData('text/plain', String(id));
@@ -3292,6 +3544,7 @@ const App = (() => {
     setBusy(true, `Uploading sample to slot ${slot}…`);
     try {
       await MF.writeSample(slot, entry.name, Mfp.b64ToBytes(entry.dataB64));
+      delete state.smData[slot];
       if (state.samples) state.samples[slot - 1] = await MF.readSampleHeader(slot);
       try {
         state.sampleStats = await MF.readSampleStats();
@@ -3299,6 +3552,7 @@ const App = (() => {
         /* stats non disponibili */
       }
       renderSamples();
+      if (state.smLastRender && state.smLastRender.slot === slot) selectSample(slot);
       toast(`Sample "${entry.name}" written to slot ${slot} ✓`, 'ok');
     } catch (e) {
       toast('Sample upload failed: ' + (e.message || e), 'err', 6000);
@@ -3434,18 +3688,6 @@ const App = (() => {
     $('btn-sm-lib-export').addEventListener('click', exportSampleLib);
     $('btn-dev-load').addEventListener('click', loadDeviceGlobals);
     $('btn-dev-apply').addEventListener('click', applyAllDeviceGlobals);
-
-    // slider dei cicli del render wavetable
-    const wtCycle = $('wt-cycle');
-    if (wtCycle) {
-      wtCycle.addEventListener('input', () => {
-        const val = $('wt-cycle-val');
-        if (val) val.textContent = wtCycle.value;
-        if (state.wtLastRender) {
-          drawWavetable($('wt-canvas'), state.wtLastRender.data, parseInt(wtCycle.value, 10) - 1);
-        }
-      });
-    }
 
     initResizers();
 

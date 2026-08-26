@@ -744,15 +744,12 @@ select {
 .tab-view { display: block; }
 .tab-view.hidden { display: none; }
 
-/* nascondi ricerca, pannello dettagli e divisorio orizzontale fuori da Presets */
+/* nascondi ricerca fuori da Presets; il pannello dettagli resta per
+   Presets/Wavetables/Samples (il tab Device resta a tutta larghezza) */
 #content.tab-wavetables #content-toolbar,
 #content.tab-samples #content-toolbar,
 #content.tab-device #content-toolbar { display: none; }
-#layout.tab-wavetables #detail-pane,
-#layout.tab-samples #detail-pane,
 #layout.tab-device #detail-pane,
-#layout.tab-wavetables .resizer-h,
-#layout.tab-samples .resizer-h,
 #layout.tab-device .resizer-h { display: none; }
 
 .tab-header { margin-bottom: 12px; }
@@ -997,3 +994,39 @@ select {
 }
 .wt-row.selected { background: var(--bg2); outline: 1px solid var(--accent2); }
 .pc-item.selected { outline: 1px solid var(--accent2); }
+
+/* render wavetable in piccolo (nel pannello dettagli) */
+.detail-render-box {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #12121a;
+  padding: 8px;
+}
+.detail-render-box .render-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+#wt-detail-canvas {
+  width: 100%;
+  height: auto;
+  display: block;
+  background: transparent;
+}
+#sm-detail-wave {
+  width: 100%;
+  height: auto;
+  display: block;
+  background: transparent;
+}
+.cycle-slider-small {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cycle-slider-small input[type="range"] { width: 110px; accent-color: var(--accent2); }
+.detail-extra { margin-top: 8px; }

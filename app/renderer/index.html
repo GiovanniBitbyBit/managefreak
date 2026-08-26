@@ -123,16 +123,6 @@
             <div id="wt-list" class="wt-list"></div>
           </div>
         </div>
-        <div id="wt-render" class="wt-render hidden">
-          <div class="wt-render-head">
-            <span id="wt-render-title" class="muted"></span>
-            <label class="cycle-slider">Cycle
-              <input id="wt-cycle" type="range" min="1" max="32" value="1" />
-              <span id="wt-cycle-val">1</span>/32
-            </label>
-          </div>
-          <canvas id="wt-canvas" width="720" height="240"></canvas>
-        </div>
       </div>
 
       <div id="samples-view" class="tab-view hidden">
@@ -221,7 +211,7 @@
     <div class="resizer resizer-h" data-resize="h" title="Drag to resize the detail pane height"></div>
 
     <div id="detail-pane">
-      <div id="detail-empty" class="detail-empty">Select a preset for details</div>
+      <div id="detail-empty" class="detail-empty">Select an item for details</div>
       <div id="detail" class="hidden">
         <h2 id="detail-name"></h2>
         <div id="detail-meta" class="detail-meta"></div>
@@ -231,7 +221,7 @@
           <textarea id="detail-notes" placeholder="Personal notes…" rows="3"></textarea>
         </div>
         <div id="detail-actions" class="detail-actions"></div>
-        <h3>Parameters</h3>
+        <h3 id="detail-params-title">Parameters</h3>
         <div id="detail-params" class="detail-params"></div>
       </div>
     </div>
