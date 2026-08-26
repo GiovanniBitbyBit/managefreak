@@ -602,7 +602,7 @@ const MF = (() => {
     const id0 = slot - 1;
     let res = await request(0x57, [id0, 0, 0], timeoutMs);
     expectReply(res, 0x15, 0, `Wavetable header slot ${slot}`);
-    await sleep(5);
+    await sleep(2);
     res = await request(0x18, [0x01], timeoutMs);
     expectReply(res, 0x16, 32, `Wavetable header packet slot ${slot}`);
     const header = unpack8to7(res.payload);
@@ -614,16 +614,18 @@ const MF = (() => {
     };
   }
 
-  async function readWavetable(slot, { onProgress, timeoutMs = 2500 } = {}) {
-    const header = await readWavetableHeader(slot, timeoutMs);
+  async function readWavetable(slot, { onProgress, timeoutMs = 2500, shouldCancel, header } = {}) {
+    if (!header) header = await readWavetableHeader(slot, timeoutMs);
     if (header.empty) return { ...header, data: null };
     const id0 = slot - 1;
     const data = new Uint8Array(WAVE_PCM_BYTES);
     for (let part = 0; part < WAVE_PARTS; part++) {
+      if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
       const res = await request(0x55, [id0, part, 0], timeoutMs);
       expectReply(res, 0x15, 0, `Wavetable part ${part} slot ${slot}`);
-      await sleep(5);
+      await sleep(2);
       for (let packet = 0; packet < WAVE_PACKETS_PER_PART; packet++) {
+        if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
         const p = await request(0x18, [0x00], timeoutMs);
         const expectedOp = packet === WAVE_PACKETS_PER_PART - 1 ? 0x17 : 0x16;
         expectReply(p, expectedOp, 32, `Wavetable packet ${part}/${packet} slot ${slot}`);
@@ -739,7 +741,7 @@ const MF = (() => {
     const id0 = slot - 1;
     let res = await request(0x5b, [id0, 0, 0], timeoutMs);
     expectReply(res, 0x15, 0, `Sample header slot ${slot}`);
-    await sleep(5);
+    await sleep(2);
     res = await request(0x18, [0x00], timeoutMs);
     expectReply(res, 0x16, 32, `Sample header packet slot ${slot}`);
     const header = unpack8to7(res.payload);
@@ -756,17 +758,19 @@ const MF = (() => {
     };
   }
 
-  async function readSample(slot, { onProgress, timeoutMs = 2500 } = {}) {
-    const header = await readSampleHeader(slot, timeoutMs);
+  async function readSample(slot, { onProgress, timeoutMs = 2500, shouldCancel, header } = {}) {
+    if (!header) header = await readSampleHeader(slot, timeoutMs);
     if (header.empty) return { ...header, data: null };
     const id0 = slot - 1;
     const partCount = Math.ceil(header.sizeBytes / SAMPLE_PART_BYTES);
     const out = [];
     for (let part = 0; part < partCount; part++) {
+      if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
       const res = await request(0x59, [id0, part], timeoutMs);
       expectReply(res, 0x15, 0, `Sample block ${part} slot ${slot}`);
-      await sleep(5);
+      await sleep(2);
       for (let packet = 0; packet < SAMPLE_PACKETS_PER_PART; packet++) {
+        if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
         const p = await request(0x18, [0x00], timeoutMs);
         const expectedOp = packet === SAMPLE_PACKETS_PER_PART - 1 ? 0x17 : 0x16;
         expectReply(p, expectedOp, 32, `Sample packet ${part}/${packet} slot ${slot}`);
@@ -942,6 +946,20 @@ const MF = (() => {
     return true;
   }
 
+  // -------------------------------------------------------------------------
+  // Lock seriale sulle transazioni MIDI: il MicroFreak ha un unico stream,
+  // quindi richieste concorrenti (es. due letture in parallelo) si
+  // sovrascriverebbero a vicenda. Tutte le operazioni pubbliche passano da qui.
+  // -------------------------------------------------------------------------
+
+  let _deviceQueue = Promise.resolve();
+  function withDeviceLock(fn) {
+    const run = _deviceQueue.then(fn, fn);
+    _deviceQueue = run.catch(() => {});
+    return run;
+  }
+  const locked = (fn) => (...args) => withDeviceLock(() => fn(...args));
+
   return {
     PRESET_PARTS, PART_LEN, HEADER_LEN, DATALEN, NAME_LEN, MAX_PRESETS,
     CATEGORIES,
@@ -949,14 +967,14 @@ const MF = (() => {
     sleep,
     request,
     parseReply,
-    readHeader,
-    readPreset,
-    readInitTemplate,
-    writePreset,
-    renamePreset,
+    readHeader: locked(readHeader),
+    readPreset: locked(readPreset),
+    readInitTemplate: locked(readInitTemplate),
+    writePreset: locked(writePreset),
+    renamePreset: locked(renamePreset),
     selectPreset,
-    scanHeaders,
-    readMany,
+    scanHeaders: locked(scanHeaders),
+    readMany: locked(readMany),
     buildHeader,
     patchHeader,
     decodeHeader,
@@ -968,11 +986,20 @@ const MF = (() => {
     SAMPLE_SLOTS, SAMPLE_PART_BYTES, SAMPLE_PACKETS_PER_PART, SAMPLE_MAX_BYTES,
     SAMPLE_TOTAL_CAPACITY_MS, SAMPLE_RATE_HZ,
     GLOBAL_CODES, GLOBAL_SPECS, globalLabel,
-    readGlobalCode, readGlobalCodes, readAllGlobals,
-    writeGlobalCode, writeGlobalSetting,
-    readWavetableHeader, readWavetable, writeWavetable, clearWavetable,
-    readSampleHeader, readSample, readSampleStats,
-    writeSample, clearSample,
+    readGlobalCode: locked(readGlobalCode),
+    readGlobalCodes: locked(readGlobalCodes),
+    readAllGlobals: locked(readAllGlobals),
+    writeGlobalCode: locked(writeGlobalCode),
+    writeGlobalSetting: locked(writeGlobalSetting),
+    readWavetableHeader: locked(readWavetableHeader),
+    readWavetable: locked(readWavetable),
+    writeWavetable: locked(writeWavetable),
+    clearWavetable: locked(clearWavetable),
+    readSampleHeader: locked(readSampleHeader),
+    readSample: locked(readSample),
+    readSampleStats: locked(readSampleStats),
+    writeSample: locked(writeSample),
+    clearSample: locked(clearSample),
   };
 })();
 

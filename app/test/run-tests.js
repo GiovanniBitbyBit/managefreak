@@ -979,6 +979,46 @@ async function test(name, fn) {
     await MF.writeSample(1, 'New', audio);
   });
 
+  await test('device lock: due operazioni concorrenti sono serializzate', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const code = MF.GLOBAL_CODES['keyboard.root_note'];
+    const header = new Uint8Array(28);
+    header[4] = 4; // 4 byte
+    header[10] = 0x41; // 'A'
+    stub.queue(
+      sysex(0, 0x15, []),
+      sysex(0, 0x16, MF.pack7to8(header)),
+    );
+    stub.queueAny(altSysex(0x42, [code, 5]));
+    // lanciate senza attendere l'una l'altra
+    await Promise.all([MF.readSampleHeader(1), MF.readGlobalCode(code)]);
+    const ops = stub.calls.map((c) => c.op);
+    const lastOfHeader = ops.lastIndexOf(0x18);   // ultima chiamata della lettura header
+    const firstGlobal = ops.indexOf(0x43);        // prima chiamata della lettura global
+    assert.ok(firstGlobal > lastOfHeader, 'le transazioni MIDI devono essere serializzate');
+  });
+
+  await test('readSample: shouldCancel interrompe la lettura', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const raw = new Uint8Array(28);
+    raw[4] = 4096; // 1 blocco
+    raw[10] = 0x41;
+    const headerObj = { slot: 1, name: 'A', sizeBytes: 4096, checksum: 0, empty: false, raw };
+    let cancelled = false;
+    let cancelNow = false;
+    const p = MF.readSample(1, { header: headerObj, shouldCancel: () => cancelNow });
+    cancelNow = true;
+    try {
+      await p;
+    } catch (e) {
+      cancelled = /Operation cancelled/.test(e.message);
+    }
+    assert.ok(cancelled, 'la lettura deve essere annullabile');
+    assert.strictEqual(stub.calls.length, 0, 'dopo la cancellazione non parte alcuna richiesta MIDI');
+  });
+
   // ================================================================== MFP: wavetable/sample
   console.log('Formati wavetable/sample (.mfw/.mfwz/.mfsample/WAV):');
 

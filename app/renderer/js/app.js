@@ -37,6 +37,8 @@ const App = (() => {
     smData: {},            // cache corpi sample letti dal dispositivo: slot → {name, sizeBytes, checksum, data}
     wtLastRender: null,    // {data, name, slot} ultima wavetable renderizzata
     smLastRender: null,    // {slot, libId} ultimo sample mostrato nel dettaglio
+    wtReadToken: 0,        // token anti-race per le letture wavetable
+    sampleReadToken: 0,    // token anti-race per le letture sample
     busy: false,
     cancelRequested: false,
     dragEntryId: null,
@@ -2868,7 +2870,7 @@ const App = (() => {
     if (!data || data.length < 512) {
       ctx.fillStyle = '#8a8a9a';
       ctx.font = '13px sans-serif';
-      ctx.fillText('No wavetable data', 12, 20);
+      ctx.fillText(data ? 'No wavetable data' : 'Loading preview…', 12, 20);
       return;
     }
     let min = 32767;
@@ -2915,7 +2917,7 @@ const App = (() => {
     if (!data || data.length < 4) {
       ctx.fillStyle = '#8a8a9a';
       ctx.font = '12px sans-serif';
-      ctx.fillText('No sample data', 12, 20);
+      ctx.fillText(data ? 'No sample data' : 'Loading preview…', 12, 20);
       return;
     }
     const mid = H / 2;
@@ -3033,30 +3035,39 @@ const App = (() => {
     if (wave) drawSampleWave(wave, data);
   }
 
-  /** Seleziona uno slot wavetable del dispositivo e mostra i dettagli. */
+  /** Seleziona uno slot wavetable del dispositivo: dettagli subito, preview in background. */
   async function selectWavetable(slot) {
     document.querySelectorAll('#wt-list .wt-row').forEach((r) => {
       r.classList.toggle('selected', parseInt(r.dataset.slot, 10) === slot);
     });
-    let cached = state.wtData[slot];
-    if (!cached) {
-      setBusy(true, `Reading wavetable slot ${slot}…`);
-      try {
-        const wt = await MF.readWavetable(slot);
-        if (!wt.data) {
-          showDetailEmpty();
-          return;
-        }
-        cached = { name: wt.name, data: wt.data };
-        state.wtData[slot] = cached;
-      } catch (e) {
-        toast('Wavetable read failed: ' + (e.message || e), 'err', 6000);
-        return;
-      } finally {
-        setBusy(false);
-      }
+    const token = ++state.wtReadToken;
+    const cached = state.wtData[slot];
+    if (cached) {
+      showWtDetail({ name: cached.name, data: cached.data, slot, source: `MicroFreak slot ${slot}` });
+      return;
     }
-    showWtDetail({ name: cached.name, data: cached.data, slot, source: `MicroFreak slot ${slot}` });
+    const header = state.wavetables && state.wavetables[slot - 1];
+    // dettagli immediati dall'header già in memoria
+    showWtDetail({ name: header ? header.name : 'Wavetable', data: null, slot, source: `MicroFreak slot ${slot}` });
+    // corpo in background; una selezione più recente cancella questa lettura
+    try {
+      const wt = await MF.readWavetable(slot, {
+        header: header || undefined,
+        shouldCancel: () => token !== state.wtReadToken,
+      });
+      if (token !== state.wtReadToken) return;
+      if (!wt.data) {
+        showDetailEmpty();
+        return;
+      }
+      state.wtData[slot] = { name: wt.name, data: wt.data };
+      if (token === state.wtReadToken) {
+        showWtDetail({ name: wt.name, data: wt.data, slot, source: `MicroFreak slot ${slot}` });
+      }
+    } catch (e) {
+      if (token !== state.wtReadToken) return; // lettura superata da una più recente
+      toast('Wavetable read failed: ' + (e.message || e), 'err', 6000);
+    }
   }
 
   /** Dettagli di una wavetable della libreria PC (senza dispositivo). */
@@ -3069,38 +3080,57 @@ const App = (() => {
     showWtDetail({ name: entry.name, data: Mfp.b64ToBytes(entry.dataB64), libId: id, source: entry.source || 'PC library' });
   }
 
-  /** Seleziona uno slot sample del dispositivo e mostra i dettagli. */
+  /** Seleziona uno slot sample del dispositivo: dettagli subito, preview in background. */
   async function selectSample(slot) {
     document.querySelectorAll('#sm-list .sm-row').forEach((r) => {
       r.classList.toggle('selected', parseInt(r.dataset.slot, 10) === slot);
     });
-    let cached = state.smData[slot];
-    if (!cached) {
-      setBusy(true, `Reading sample slot ${slot}…`);
-      try {
-        const s = await MF.readSample(slot);
-        if (!s.data) {
-          showDetailEmpty();
-          return;
-        }
-        cached = { name: s.name, sizeBytes: s.sizeBytes, checksum: s.checksum, data: s.data };
-        state.smData[slot] = cached;
-      } catch (e) {
-        toast('Sample read failed: ' + (e.message || e), 'err', 6000);
-        return;
-      } finally {
-        setBusy(false);
-      }
+    const token = ++state.sampleReadToken;
+    const cached = state.smData[slot];
+    if (cached) {
+      showSmDetail({
+        name: cached.name, data: cached.data, slot,
+        source: `MicroFreak slot ${slot}`,
+        sizeBytes: cached.sizeBytes,
+        durationMs: Math.round((cached.sizeBytes / 2 / 32000) * 1000),
+        checksum: cached.checksum,
+      });
+      return;
     }
+    const header = state.samples && state.samples[slot - 1];
+    // dettagli immediati dall'header già in memoria
     showSmDetail({
-      name: cached.name,
-      data: cached.data,
-      slot,
+      name: header ? header.name : 'Sample', data: null, slot,
       source: `MicroFreak slot ${slot}`,
-      sizeBytes: cached.sizeBytes,
-      durationMs: Math.round((cached.sizeBytes / 2 / 32000) * 1000),
-      checksum: cached.checksum,
+      sizeBytes: header ? header.sizeBytes : 0,
+      durationMs: header ? Math.round((header.sizeBytes / 2 / 32000) * 1000) : 0,
+      checksum: header ? header.checksum : null,
     });
+    // corpo in background; una selezione più recente cancella questa lettura
+    try {
+      const s = await MF.readSample(slot, {
+        header: header || undefined,
+        shouldCancel: () => token !== state.sampleReadToken,
+      });
+      if (token !== state.sampleReadToken) return;
+      if (!s.data) {
+        showDetailEmpty();
+        return;
+      }
+      state.smData[slot] = { name: s.name, sizeBytes: s.sizeBytes, checksum: s.checksum, data: s.data };
+      if (token === state.sampleReadToken) {
+        showSmDetail({
+          name: s.name, data: s.data, slot,
+          source: `MicroFreak slot ${slot}`,
+          sizeBytes: s.sizeBytes,
+          durationMs: Math.round((s.sizeBytes / 2 / 32000) * 1000),
+          checksum: s.checksum,
+        });
+      }
+    } catch (e) {
+      if (token !== state.sampleReadToken) return; // lettura superata da una più recente
+      toast('Sample read failed: ' + (e.message || e), 'err', 6000);
+    }
   }
 
   /** Dettagli di un sample della libreria PC. */
