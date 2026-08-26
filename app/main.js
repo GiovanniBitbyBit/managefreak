@@ -14,6 +14,7 @@ function createWindow() {
     height: 880,
     minWidth: 1100,
     minHeight: 640,
+    show: false, // mostrata solo dopo la massimizzazione (niente flicker)
     title: 'ManageFreak',
     backgroundColor: '#16161e',
     icon: path.join(__dirname, 'assets', 'icon.png'),
@@ -24,6 +25,10 @@ function createWindow() {
       sandbox: false,
     },
   });
+
+  // avvio a schermo pieno (maximized, non fullscreen)
+  mainWindow.maximize();
+  mainWindow.once('ready-to-show', () => mainWindow.show());
 
   mainWindow.removeMenu();
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
