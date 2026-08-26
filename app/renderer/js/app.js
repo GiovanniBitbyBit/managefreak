@@ -233,6 +233,14 @@ const App = (() => {
     autoPick(el.midiOutput, 'microfreak');
   }
 
+  /** Sincronizza dal MicroFreak: firmware, 512 preset, 16 wavetable, 128 sample. */
+  async function syncAllFromDevice() {
+    await detectFirmware();
+    await scanDevice();
+    await readWavetableInventory();
+    await readSampleInventory();
+  }
+
   async function connect() {
     const inId = el.midiInput.value;
     const outId = el.midiOutput.value;
@@ -244,12 +252,9 @@ const App = (() => {
       await Midi.open(inId, outId);
       el.connStatus.className = 'status-dot online';
       el.connStatus.title = `Connected: ${Midi.currentNames().output}`;
-      status('Connected to the MicroFreak. Auto-scanning…');
-      // firmware + scansione automatica della libreria del dispositivo
-      setTimeout(async () => {
-        await detectFirmware();
-        await scanDevice();
-      }, 250);
+      status('Connected to the MicroFreak. Synchronizing…');
+      // firmware + scansione automatica di preset, wavetable e sample
+      setTimeout(() => syncAllFromDevice(), 250);
     } catch (e) {
       el.connStatus.className = 'status-dot error';
       toast('Connection failed: ' + (e.message || e), 'err', 6000);
@@ -3246,8 +3251,8 @@ const App = (() => {
 
     el.btnRefreshPorts.addEventListener('click', async () => {
       await refreshPorts();
-      // se già connesso, riscansiona i preset del dispositivo
-      if (Midi.isOpen()) scanDevice();
+      // se già connesso, risincronizza preset, wavetable e sample
+      if (Midi.isOpen()) syncAllFromDevice();
     });
     el.btnConnect.addEventListener('click', connect);
     el.btnReadAll.addEventListener('click', readAllOccupied);
