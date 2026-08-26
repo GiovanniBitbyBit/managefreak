@@ -72,6 +72,11 @@ To **build from source**:
 > Writes are verified on **MicroFreak firmware 5.x** (the same protocol verified on hardware
 > by Elektroid and freakout). Reading uses the same documented operation family that also
 > works on earlier firmware; read presets are saved losslessly either way.
+>
+> Hardware-verified on a real MicroFreak: preset read/write/rename/reorder, wavetable and
+> sample read/write, **sample and wavetable rename and reorder (swap/shift)** — sample
+> reordering rewrites only the directory entries, so it is fast even for large samples,
+> and device settings read/write.
 
 ---
 
