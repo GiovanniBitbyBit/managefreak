@@ -64,6 +64,11 @@ function createWindow() {
               if (!view || view.classList.contains('hidden')) issues.push('tab view not shown: ' + btn.dataset.tab);
               const side = document.getElementById(sidebarByTab[btn.dataset.tab]);
               if (!side || side.classList.contains('hidden')) issues.push('sidebar not shown: ' + btn.dataset.tab);
+              const backup = document.getElementById('sidebar-backup');
+              const backupHidden = !backup || backup.classList.contains('hidden');
+              if (btn.dataset.tab === 'presets' ? backupHidden : !backupHidden) {
+                issues.push('backup section visibility wrong for ' + btn.dataset.tab);
+              }
             }
             tabBtns[0].click();
             if (document.getElementById('library-view').classList.contains('hidden')) issues.push('presets view not restored');
@@ -99,10 +104,11 @@ function createWindow() {
             const detailActions = document.getElementById('detail-actions');
             const nMulti = detailActions ? detailActions.querySelectorAll('button').length : 0;
             if (nMulti < 5) issues.push('multi-selection actions missing in details: ' + nMulti);
-            // deselezione: click singolo su una card
+            // deselezione: click singolo su una card già selezionata → pannello vuoto
             cards[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
-            const nSingle = detailActions ? detailActions.querySelectorAll('button').length : 0;
-            if (nSingle >= 5) issues.push('multi-selection actions still visible after deselect');
+            const detailHidden = document.getElementById('detail').classList.contains('hidden');
+            const emptyShown = !document.getElementById('detail-empty').classList.contains('hidden');
+            if (!detailHidden || !emptyShown) issues.push('click su card selezionata non ha deselezionato');
           }
           return JSON.stringify({ missing, dom, issues });
         })()`);

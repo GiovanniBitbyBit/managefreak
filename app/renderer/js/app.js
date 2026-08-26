@@ -31,8 +31,14 @@ const App = (() => {
     samples: null,         // header dei 128 slot sample
     sampleStats: null,     // {usedMs, freeMs, capacityMs, ...}
     deviceGlobals: null,   // {nomeGlobal: valore}
-    wtLib: [],             // libreria PC wavetable: [{id, name, dataB64, addedAt, source}]
-    smLib: [],             // libreria PC sample: [{id, name, dataB64, sizeBytes, durationMs, ...}]
+    wtLib: [],             // libreria PC wavetable: [{id, name, dataB64, collectionId, addedAt, source}]
+    smLib: [],             // libreria PC sample: [{id, name, dataB64, sizeBytes, durationMs, collectionId, ...}]
+    wtCols: [],            // cartelle della libreria wavetable: [{id, name}]
+    smCols: [],            // cartelle della libreria sample: [{id, name}]
+    wtFilter: 'all',       // 'all' | 'none' | id cartella
+    smFilter: 'all',       // 'all' | 'none' | id cartella
+    wtLibSel: null,        // id voce libreria PC wavetable selezionata
+    smLibSel: null,        // id voce libreria PC sample selezionata
     wtData: {},            // cache corpi wavetable letti dal dispositivo: slot → {name, data}
     smData: {},            // cache corpi sample letti dal dispositivo: slot → {name, sizeBytes, checksum, data}
     wtLastRender: null,    // {data, name, slot} ultima wavetable renderizzata
@@ -705,9 +711,15 @@ const App = (() => {
       state.selectedDeviceSlots.clear();
       for (let s = a; s <= b; s++) state.selectedDeviceSlots.add(s);
     } else {
-      state.selectedDeviceSlots.clear();
-      state.selectedDeviceSlots.add(slot);
-      state.devSelAnchor = slot;
+      if (state.selectedDeviceSlots.has(slot)) {
+        // click su uno slot già selezionato → deseleziona
+        state.selectedDeviceSlots.clear();
+        state.devSelAnchor = null;
+      } else {
+        state.selectedDeviceSlots.clear();
+        state.selectedDeviceSlots.add(slot);
+        state.devSelAnchor = slot;
+      }
     }
     updateDeviceSelectionUI();
   }
@@ -1361,9 +1373,15 @@ const App = (() => {
         state.selAnchor = id;
       }
     } else {
-      state.selLib.clear();
-      state.selLib.add(id);
-      state.selAnchor = id;
+      if (state.selLib.has(id)) {
+        // click su un preset già selezionato → deseleziona
+        state.selLib.clear();
+        state.selAnchor = null;
+      } else {
+        state.selLib.clear();
+        state.selLib.add(id);
+        state.selAnchor = id;
+      }
     }
     updateSelectionUI();
   }
@@ -2303,6 +2321,8 @@ const App = (() => {
     for (const id of ['sidebar-library', 'sidebar-wavetables', 'sidebar-samples']) {
       $('' + id).classList.toggle('hidden', id !== libTarget);
     }
+    // il backup completo del dispositivo è visibile solo nella scheda Presets
+    $('sidebar-backup').classList.toggle('hidden', tab !== 'presets');
     if (tab === 'wavetables') {
       renderWavetableSidebar();
       renderWavetablePc();
@@ -3124,6 +3144,15 @@ const App = (() => {
       actions.push({ id: 'send', label: '➡ Send to MicroFreak', run: () => sendWavetableToDevice(libId) });
       actions.push({ id: 'del', label: '✕ Remove from PC', run: () => { deleteWavetableFromLib(libId); showDetailEmpty(); } });
     }
+    let extraHtml = null;
+    if (libId) {
+      const entry = state.wtLib.find((e) => e.id === libId);
+      const collOpts = ['<option value="">— No folder —</option>'];
+      for (const c of state.wtCols) {
+        collOpts.push(`<option value="${c.id}" ${entry && entry.collectionId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`);
+      }
+      extraHtml = `<div class="detail-coll"><label>Library</label><select id="wt-detail-coll">${collOpts.join('')}</select></div>`;
+    }
     renderDetail({
       name,
       metaRows: [
@@ -3134,6 +3163,7 @@ const App = (() => {
       tagInput: null,
       notes: null,
       actions,
+      extraHtml,
       params: [],
       hideParams: true,
       sideHtml: `<div class="detail-render-box">
@@ -3151,6 +3181,14 @@ const App = (() => {
         else if (libId) renameWavetableLibEntry(libId, newName);
       },
     });
+    const collSel = $('wt-detail-coll');
+    if (collSel) {
+      collSel.addEventListener('change', () => {
+        const v = collSel.value;
+        moveWtEntryToCollection(libId, v ? parseInt(v, 10) : null);
+        _showWtLibDetail(libId);
+      });
+    }
     const canvas = $('wt-detail-canvas');
     if (canvas) {
       drawWavetable(canvas, data, 0);
@@ -3177,6 +3215,15 @@ const App = (() => {
       actions.push({ id: 'send', label: '➡ Send to MicroFreak', run: () => sendSampleToDevice(libId) });
       actions.push({ id: 'del', label: '✕ Remove from PC', run: () => { deleteSampleFromLib(libId); showDetailEmpty(); } });
     }
+    let extraHtml = null;
+    if (libId) {
+      const entry = state.smLib.find((e) => e.id === libId);
+      const collOpts = ['<option value="">— No folder —</option>'];
+      for (const c of state.smCols) {
+        collOpts.push(`<option value="${c.id}" ${entry && entry.collectionId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`);
+      }
+      extraHtml = `<div class="detail-coll"><label>Library</label><select id="sm-detail-coll">${collOpts.join('')}</select></div>`;
+    }
     renderDetail({
       name,
       metaRows: [
@@ -3189,6 +3236,7 @@ const App = (() => {
       tagInput: null,
       notes: null,
       actions,
+      extraHtml,
       params: [],
       hideParams: true,
       sideHtml: `<div class="detail-render-box">
@@ -3200,6 +3248,14 @@ const App = (() => {
         else if (libId) renameSampleLibEntry(libId, newName);
       },
     });
+    const collSel = $('sm-detail-coll');
+    if (collSel) {
+      collSel.addEventListener('change', () => {
+        const v = collSel.value;
+        moveSmEntryToCollection(libId, v ? parseInt(v, 10) : null);
+        _showSmLibDetail(libId);
+      });
+    }
     const wave = $('sm-detail-wave');
     if (wave) drawSampleWave(wave, data);
   }
@@ -3237,14 +3293,26 @@ const App = (() => {
 
   /** Dettagli di una wavetable della libreria PC (senza dispositivo). */
   function renderWavetableFromLib(id) {
+    if (state.wtLibSel === id) {
+      // click sulla stessa voce già selezionata → deseleziona
+      state.wtLibSel = null;
+      document.querySelectorAll('#wt-pc-list .pc-item').forEach((item) => item.classList.remove('selected'));
+      document.querySelectorAll('#wt-lib-list .cat-item').forEach((row) => row.classList.remove('selected'));
+      showDetailEmpty();
+      return;
+    }
     const entry = state.wtLib.find((e) => e.id === id);
     if (!entry) return;
+    state.wtLibSel = id;
     document.querySelectorAll('#wt-pc-list .pc-item').forEach((item) => {
       item.classList.toggle('selected', String(item.dataset.id) === String(id));
     });
-    document.querySelectorAll('#wt-lib-list .lib-item-row').forEach((row) => {
-      row.classList.toggle('selected', String(row.dataset.wtLib) === String(id));
-    });
+    _showWtLibDetail(id);
+  }
+
+  function _showWtLibDetail(id) {
+    const entry = state.wtLib.find((e) => e.id === id);
+    if (!entry) return;
     showWtDetail({ name: entry.name, data: Mfp.b64ToBytes(entry.dataB64), libId: id, source: entry.source || 'PC library' });
   }
 
@@ -3299,14 +3367,26 @@ const App = (() => {
 
   /** Dettagli di un sample della libreria PC. */
   function renderSampleFromLib(id) {
+    if (state.smLibSel === id) {
+      // click sulla stessa voce già selezionata → deseleziona
+      state.smLibSel = null;
+      document.querySelectorAll('#sm-pc-list .pc-item').forEach((item) => item.classList.remove('selected'));
+      document.querySelectorAll('#sm-lib-list .cat-item').forEach((row) => row.classList.remove('selected'));
+      showDetailEmpty();
+      return;
+    }
     const entry = state.smLib.find((e) => e.id === id);
     if (!entry) return;
+    state.smLibSel = id;
     document.querySelectorAll('#sm-pc-list .pc-item').forEach((item) => {
       item.classList.toggle('selected', String(item.dataset.id) === String(id));
     });
-    document.querySelectorAll('#sm-lib-list .lib-item-row').forEach((row) => {
-      row.classList.toggle('selected', String(row.dataset.smLib) === String(id));
-    });
+    _showSmLibDetail(id);
+  }
+
+  function _showSmLibDetail(id) {
+    const entry = state.smLib.find((e) => e.id === id);
+    if (!entry) return;
     showSmDetail({
       name: entry.name,
       data: Mfp.b64ToBytes(entry.dataB64),
@@ -3341,7 +3421,7 @@ const App = (() => {
     saveWavetableLib();
     renderWavetableSidebar();
     renderWavetablePc();
-    renderWavetableFromLib(id);
+    _showWtLibDetail(id);
   }
 
   async function renameSampleDetail(slot, newName) {
@@ -3368,7 +3448,7 @@ const App = (() => {
     saveSampleLib();
     renderSampleSidebar();
     renderSamplePc();
-    renderSampleFromLib(id);
+    _showSmLibDetail(id);
   }
 
   // ---------------------------------------------------------------- multi-selezione wavetable/sample
@@ -3388,9 +3468,15 @@ const App = (() => {
       state.wtSel.clear();
       for (let s = a; s <= b; s++) state.wtSel.add(s);
     } else {
-      state.wtSel.clear();
-      state.wtSel.add(slot);
-      state.wtSelAnchor = slot;
+      if (state.wtSel.has(slot)) {
+        // click su uno slot già selezionato → deseleziona
+        state.wtSel.clear();
+        state.wtSelAnchor = null;
+      } else {
+        state.wtSel.clear();
+        state.wtSel.add(slot);
+        state.wtSelAnchor = slot;
+      }
     }
     updateWtSelectionUI();
   }
@@ -3410,9 +3496,15 @@ const App = (() => {
       state.smSel.clear();
       for (let s = a; s <= b; s++) state.smSel.add(s);
     } else {
-      state.smSel.clear();
-      state.smSel.add(slot);
-      state.smSelAnchor = slot;
+      if (state.smSel.has(slot)) {
+        // click su uno slot già selezionato → deseleziona
+        state.smSel.clear();
+        state.smSelAnchor = null;
+      } else {
+        state.smSel.clear();
+        state.smSel.add(slot);
+        state.smSelAnchor = slot;
+      }
     }
     updateSmSelectionUI();
   }
@@ -3498,6 +3590,7 @@ const App = (() => {
             id: _libId(),
             name: (wt.name || 'Wavetable').slice(0, 15),
             dataB64: Mfp.bytesToB64(wt.data),
+            collectionId: wtTargetCollection(),
             addedAt: Date.now(),
             source: `MicroFreak slot ${slot}`,
           });
@@ -3534,6 +3627,7 @@ const App = (() => {
             dataB64: Mfp.bytesToB64(s.data),
             sizeBytes: s.sizeBytes,
             durationMs: Math.round((s.sizeBytes / 2 / 32000) * 1000),
+            collectionId: smTargetCollection(),
             addedAt: Date.now(),
             source: `MicroFreak slot ${slot}`,
           });
@@ -3754,71 +3848,216 @@ const App = (() => {
   }
 
   async function loadWavetableLib() {
-    const data = await loadJsonLib('wavetables.json', { version: 1, entries: [] });
+    const data = await loadJsonLib('wavetables.json', { version: 2, collections: [], entries: [] });
     state.wtLib = Array.isArray(data && data.entries) ? data.entries : [];
+    state.wtCols = Array.isArray(data && data.collections) ? data.collections : [];
+    for (const e of state.wtLib) if (e.collectionId === undefined) e.collectionId = null;
   }
 
   async function saveWavetableLib() {
-    await saveJsonLib('wavetables.json', { version: 1, entries: state.wtLib });
+    await saveJsonLib('wavetables.json', { version: 2, collections: state.wtCols, entries: state.wtLib });
   }
 
   async function loadSampleLib() {
-    const data = await loadJsonLib('samples.json', { version: 1, entries: [] });
+    const data = await loadJsonLib('samples.json', { version: 2, collections: [], entries: [] });
     state.smLib = Array.isArray(data && data.entries) ? data.entries : [];
+    state.smCols = Array.isArray(data && data.collections) ? data.collections : [];
+    for (const e of state.smLib) if (e.collectionId === undefined) e.collectionId = null;
   }
 
   async function saveSampleLib() {
-    await saveJsonLib('samples.json', { version: 1, entries: state.smLib });
+    await saveJsonLib('samples.json', { version: 2, collections: state.smCols, entries: state.smLib });
   }
+
+  const wtVisibleEntries = () => {
+    if (state.wtFilter === 'none') return state.wtLib.filter((e) => !e.collectionId);
+    if (state.wtFilter !== 'all') {
+      const cid = parseInt(state.wtFilter, 10);
+      return state.wtLib.filter((e) => e.collectionId === cid);
+    }
+    return state.wtLib;
+  };
+
+  const smVisibleEntries = () => {
+    if (state.smFilter === 'none') return state.smLib.filter((e) => !e.collectionId);
+    if (state.smFilter !== 'all') {
+      const cid = parseInt(state.smFilter, 10);
+      return state.smLib.filter((e) => e.collectionId === cid);
+    }
+    return state.smLib;
+  };
+
+  const wtTargetCollection = () => (state.wtFilter !== 'all' && state.wtFilter !== 'none' ? parseInt(state.wtFilter, 10) : null);
+  const smTargetCollection = () => (state.smFilter !== 'all' && state.smFilter !== 'none' ? parseInt(state.smFilter, 10) : null);
 
   function renderWavetableSidebar() {
     const list = $('wt-lib-list');
     if (!list) return;
-    list.innerHTML = state.wtLib.length
-      ? state.wtLib.map((e) => `<div class="lib-item-row" data-wt-lib="${e.id}">
-          <span class="li-name" title="${esc(e.name)}">${esc(e.name)}</span>
-          <span class="li-x" data-del="${e.id}" title="Remove from PC library">✕</span>
-        </div>`).join('')
-      : '<div class="hint" style="padding:6px">No wavetables on this PC yet.</div>';
-    list.querySelectorAll('[data-del]').forEach((x) => {
+    let html = `<div class="cat-item ${state.wtFilter === 'all' ? 'active' : ''}" data-wtf="all">
+      <span class="coll-name">All wavetables</span>
+      <span class="cat-count">${state.wtLib.length}</span></div>`;
+    for (const c of state.wtCols) {
+      const n = state.wtLib.filter((e) => e.collectionId === c.id).length;
+      html += `<div class="cat-item ${state.wtFilter === String(c.id) ? 'active' : ''}" data-wtf="${c.id}">
+        <span class="coll-name">${esc(c.name)}</span>
+        <span class="coll-x" data-wtcdel="${c.id}" title="Delete folder (wavetables stay)">✕</span>
+        <span class="cat-count">${n}</span></div>`;
+    }
+    const noneCount = state.wtLib.filter((e) => !e.collectionId).length;
+    html += `<div class="cat-item ${state.wtFilter === 'none' ? 'active' : ''}" data-wtf="none">
+      <span class="coll-name">No folder</span> <span class="cat-count">${noneCount}</span></div>`;
+    html += `<div class="cat-item" data-wtf="new" style="color:var(--muted)"><span class="coll-name">＋ New folder…</span></div>`;
+    list.innerHTML = html;
+    list.querySelectorAll('[data-wtcdel]').forEach((x) => {
       x.addEventListener('click', (e) => {
         e.stopPropagation();
-        deleteWavetableFromLib(x.dataset.del);
+        deleteWtFolder(parseInt(x.dataset.wtcdel, 10));
       });
     });
-    list.querySelectorAll('.lib-item-row').forEach((row) => {
-      row.addEventListener('click', () => renderWavetableFromLib(row.dataset.wtLib));
+    list.querySelectorAll('[data-wtf]').forEach((item) => {
+      item.addEventListener('click', async () => {
+        const v = item.dataset.wtf;
+        if (v === 'new') {
+          const ok = await showModal('New folder',
+            `<div class="field"><label>Name</label><input id="m-cname" type="text" placeholder="e.g. Granular pack" /></div>`,
+            { okLabel: 'Create' });
+          if (ok && $('m-cname').value.trim()) {
+            const cid = wtAddFolder($('m-cname').value.trim());
+            state.wtFilter = String(cid);
+            state.wtLibSel = null;
+            renderWavetableSidebar();
+            renderWavetablePc();
+            showDetailEmpty();
+          }
+          return;
+        }
+        state.wtFilter = v;
+        state.wtLibSel = null;
+        renderWavetableSidebar();
+        renderWavetablePc();
+        showDetailEmpty();
+      });
     });
+  }
+
+  const wtAddFolder = (name) => {
+    const c = { id: Date.now(), name: name.slice(0, 40) };
+    state.wtCols.push(c);
+    saveWavetableLib();
+    return c.id;
+  };
+
+  async function deleteWtFolder(cid) {
+    const c = state.wtCols.find((cc) => cc.id === cid);
+    const ok = await showModal('Delete folder',
+      `<p>Delete the folder "${esc(c ? c.name : '')}"? Its wavetables stay in the library, just without a folder.</p>`,
+      { okLabel: 'Delete' });
+    if (!ok) return;
+    state.wtCols = state.wtCols.filter((cc) => cc.id !== cid);
+    for (const e of state.wtLib) if (e.collectionId === cid) e.collectionId = null;
+    if (state.wtFilter === String(cid)) state.wtFilter = 'all';
+    await saveWavetableLib();
+    renderWavetableSidebar();
+    renderWavetablePc();
+  }
+
+  function moveWtEntryToCollection(id, collId) {
+    const e = state.wtLib.find((x) => x.id === id);
+    if (!e) return;
+    e.collectionId = collId;
+    saveWavetableLib();
+    renderWavetableSidebar();
+    renderWavetablePc();
   }
 
   function renderSampleSidebar() {
     const list = $('sm-lib-list');
     if (!list) return;
-    list.innerHTML = state.smLib.length
-      ? state.smLib.map((e) => `<div class="lib-item-row" data-sm-lib="${e.id}">
-          <span class="li-name" title="${esc(e.name)}">${esc(e.name)}</span>
-          <span class="li-meta">${fmtMs(e.durationMs || 0)}</span>
-          <span class="li-x" data-del="${e.id}" title="Remove from PC library">✕</span>
-        </div>`).join('')
-      : '<div class="hint" style="padding:6px">No samples on this PC yet.</div>';
-    list.querySelectorAll('[data-del]').forEach((x) => {
+    let html = `<div class="cat-item ${state.smFilter === 'all' ? 'active' : ''}" data-smf="all">
+      <span class="coll-name">All samples</span>
+      <span class="cat-count">${state.smLib.length}</span></div>`;
+    for (const c of state.smCols) {
+      const n = state.smLib.filter((e) => e.collectionId === c.id).length;
+      html += `<div class="cat-item ${state.smFilter === String(c.id) ? 'active' : ''}" data-smf="${c.id}">
+        <span class="coll-name">${esc(c.name)}</span>
+        <span class="coll-x" data-smcdel="${c.id}" title="Delete folder (samples stay)">✕</span>
+        <span class="cat-count">${n}</span></div>`;
+    }
+    const noneCount = state.smLib.filter((e) => !e.collectionId).length;
+    html += `<div class="cat-item ${state.smFilter === 'none' ? 'active' : ''}" data-smf="none">
+      <span class="coll-name">No folder</span> <span class="cat-count">${noneCount}</span></div>`;
+    html += `<div class="cat-item" data-smf="new" style="color:var(--muted)"><span class="coll-name">＋ New folder…</span></div>`;
+    list.innerHTML = html;
+    list.querySelectorAll('[data-smcdel]').forEach((x) => {
       x.addEventListener('click', (e) => {
         e.stopPropagation();
-        deleteSampleFromLib(x.dataset.del);
+        deleteSmFolder(parseInt(x.dataset.smcdel, 10));
       });
     });
-    list.querySelectorAll('.lib-item-row').forEach((row) => {
-      row.addEventListener('click', () => renderSampleFromLib(row.dataset.smLib));
+    list.querySelectorAll('[data-smf]').forEach((item) => {
+      item.addEventListener('click', async () => {
+        const v = item.dataset.smf;
+        if (v === 'new') {
+          const ok = await showModal('New folder',
+            `<div class="field"><label>Name</label><input id="m-cname" type="text" placeholder="e.g. Drums" /></div>`,
+            { okLabel: 'Create' });
+          if (ok && $('m-cname').value.trim()) {
+            const cid = smAddFolder($('m-cname').value.trim());
+            state.smFilter = String(cid);
+            state.smLibSel = null;
+            renderSampleSidebar();
+            renderSamplePc();
+            showDetailEmpty();
+          }
+          return;
+        }
+        state.smFilter = v;
+        state.smLibSel = null;
+        renderSampleSidebar();
+        renderSamplePc();
+        showDetailEmpty();
+      });
     });
+  }
+
+  const smAddFolder = (name) => {
+    const c = { id: Date.now(), name: name.slice(0, 40) };
+    state.smCols.push(c);
+    saveSampleLib();
+    return c.id;
+  };
+
+  async function deleteSmFolder(cid) {
+    const c = state.smCols.find((cc) => cc.id === cid);
+    const ok = await showModal('Delete folder',
+      `<p>Delete the folder "${esc(c ? c.name : '')}"? Its samples stay in the library, just without a folder.</p>`,
+      { okLabel: 'Delete' });
+    if (!ok) return;
+    state.smCols = state.smCols.filter((cc) => cc.id !== cid);
+    for (const e of state.smLib) if (e.collectionId === cid) e.collectionId = null;
+    if (state.smFilter === String(cid)) state.smFilter = 'all';
+    await saveSampleLib();
+    renderSampleSidebar();
+    renderSamplePc();
+  }
+
+  function moveSmEntryToCollection(id, collId) {
+    const e = state.smLib.find((x) => x.id === id);
+    if (!e) return;
+    e.collectionId = collId;
+    saveSampleLib();
+    renderSampleSidebar();
+    renderSamplePc();
   }
 
   function renderWavetablePc() {
     const list = $('wt-pc-list');
     if (!list) return;
+    const entries = wtVisibleEntries();
     const count = $('wt-lib-count');
-    if (count) count.textContent = `(${state.wtLib.length})`;
-    list.innerHTML = state.wtLib.length
-      ? state.wtLib.map((e) => `<div class="pc-item" draggable="true" data-id="${e.id}">
+    if (count) count.textContent = `(${entries.length})`;
+    list.innerHTML = entries.length
+      ? entries.map((e) => `<div class="pc-item" draggable="true" data-id="${e.id}">
           <div>
             <div class="pc-name" title="${esc(e.name)}">${esc(e.name)}</div>
             <div class="pc-meta">${e.addedAt ? new Date(e.addedAt).toLocaleDateString() : ''}</div>
@@ -3859,10 +4098,11 @@ const App = (() => {
   function renderSamplePc() {
     const list = $('sm-pc-list');
     if (!list) return;
+    const entries = smVisibleEntries();
     const count = $('sm-lib-count');
-    if (count) count.textContent = `(${state.smLib.length})`;
-    list.innerHTML = state.smLib.length
-      ? state.smLib.map((e) => `<div class="pc-item" draggable="true" data-id="${e.id}">
+    if (count) count.textContent = `(${entries.length})`;
+    list.innerHTML = entries.length
+      ? entries.map((e) => `<div class="pc-item" draggable="true" data-id="${e.id}">
           <div>
             <div class="pc-name" title="${esc(e.name)}">${esc(e.name)}</div>
             <div class="pc-meta">${fmtMs(e.durationMs || 0)} · ${((e.dataB64 ? e.dataB64.length * 3 / 4 : 0) / 1024).toFixed(0)} KB</div>
@@ -3923,6 +4163,7 @@ const App = (() => {
           id: _libId(),
           name: (wt.name || 'Wavetable').slice(0, 15),
           dataB64: Mfp.bytesToB64(wt.data),
+          collectionId: wtTargetCollection(),
           addedAt: Date.now(),
           source: f.name,
         });
@@ -3974,6 +4215,7 @@ const App = (() => {
           dataB64: Mfp.bytesToB64(data),
           sizeBytes: data.length,
           durationMs: Math.round((data.length / 2 / 32000) * 1000),
+          collectionId: smTargetCollection(),
           addedAt: Date.now(),
           source: f.name,
         });
@@ -4044,6 +4286,7 @@ const App = (() => {
 
   async function deleteWavetableFromLib(id) {
     state.wtLib = state.wtLib.filter((e) => e.id !== id);
+    if (state.wtLibSel === id) state.wtLibSel = null;
     await saveWavetableLib();
     renderWavetableSidebar();
     renderWavetablePc();
@@ -4051,6 +4294,7 @@ const App = (() => {
 
   async function deleteSampleFromLib(id) {
     state.smLib = state.smLib.filter((e) => e.id !== id);
+    if (state.smLibSel === id) state.smLibSel = null;
     await saveSampleLib();
     renderSampleSidebar();
     renderSamplePc();
@@ -4150,6 +4394,7 @@ const App = (() => {
         id: _libId(),
         name: (wt.name || 'Wavetable').slice(0, 15),
         dataB64: Mfp.bytesToB64(wt.data),
+        collectionId: wtTargetCollection(),
         addedAt: Date.now(),
         source: `MicroFreak slot ${slot}`,
       });
@@ -4176,6 +4421,7 @@ const App = (() => {
         dataB64: Mfp.bytesToB64(s.data),
         sizeBytes: s.data.length,
         durationMs: Math.round((s.data.length / 2 / 32000) * 1000),
+        collectionId: smTargetCollection(),
         addedAt: Date.now(),
         source: `MicroFreak slot ${slot}`,
       });
