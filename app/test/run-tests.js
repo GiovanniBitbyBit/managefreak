@@ -1119,12 +1119,12 @@ async function test(name, fn) {
     const r2 = Mfp.wavToWavetable(long, 'Long');
     assert.strictEqual(r2.data.length, 16384);
     // 32 kHz con 1024 campioni → ripete ciclicamente fino a 8192
-    const short = makeWav({ rate: 32000, data: new Uint8Array(2048) });
+    const orig = new Uint8Array(2048);
+    for (let i = 0; i < 2048; i++) orig[i] = (i * 3) & 0xff;
+    const short = makeWav({ rate: 32000, data: orig });
     const r3 = Mfp.wavToWavetable(short, 'Short');
     assert.strictEqual(r3.data.length, 16384);
     // i primi 1024 campioni dell'originale compaiono 8 volte (loop perfetto)
-    const orig = new Uint8Array(2048);
-    for (let i = 0; i < 2048; i++) orig[i] = (i * 3) & 0xff;
     const rep = new Uint8Array(16384);
     for (let k = 0; k < 8; k++) rep.set(orig, k * 2048);
     assert.deepStrictEqual(Array.from(r3.data), Array.from(rep));
