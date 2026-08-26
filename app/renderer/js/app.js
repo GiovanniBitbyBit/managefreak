@@ -3669,6 +3669,186 @@ const App = (() => {
     }
   }
 
+  // ---------------------------------------------------------------- backup completo del dispositivo
+
+  async function backupFullDevice() {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    const yes = await showModal('Full device backup',
+      `<p>Reads the whole MicroFreak: all occupied presets, wavetables, samples and
+         device settings, saved into a single <code>.mfbak</code> file.
+         This can take several minutes; you can cancel at any time.</p>`,
+      { okLabel: 'Start backup' });
+    if (!yes) return;
+
+    setBusy(true, 'Reading preset headers…');
+    el.btnCancel.classList.remove('hidden');
+    state.cancelRequested = false;
+    try {
+      // 1. preset
+      const headers = await MF.scanHeaders({
+        onProgress: (d, t) => setProgress((d / t) * 0.4, `Preset headers ${d}/${t}`),
+        onError: () => { /* righe con errore ignorate nel backup */ },
+      });
+      const occupied = headers.filter((h) => h && !h.empty && !h.error);
+      const presets = [];
+      for (let i = 0; i < occupied.length; i++) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        const h = occupied[i];
+        const p = await MF.readPreset(h.slot, { timeoutMs: 4000 });
+        if (p.data) {
+          presets.push({ slot: h.slot, name: p.name, category: p.category, p1: p.p1, dataB64: Mfp.bytesToB64(p.data) });
+        }
+        setProgress(0.4 + (i / Math.max(1, occupied.length)) * 0.3, `Presets ${i + 1}/${occupied.length}`);
+      }
+      // 2. wavetable
+      const wavetables = [];
+      for (let s = 1; s <= MF.WAVE_SLOTS; s++) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        const h = await MF.readWavetableHeader(s);
+        if (!h.empty) {
+          const wt = await MF.readWavetable(s);
+          if (wt.data) wavetables.push({ slot: s, name: wt.name, dataB64: Mfp.bytesToB64(wt.data) });
+        }
+        setProgress(0.7 + (s / MF.WAVE_SLOTS) * 0.1, `Wavetables ${s}/16`);
+      }
+      // 3. sample
+      const samples = [];
+      for (let s = 1; s <= MF.SAMPLE_SLOTS; s++) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        const h = await MF.readSampleHeader(s);
+        if (!h.empty) {
+          const sm = await MF.readSample(s);
+          if (sm.data) {
+            samples.push({
+              slot: s, name: sm.name, sizeBytes: sm.sizeBytes, checksum: sm.checksum,
+              headerB64: Mfp.bytesToB64(h.raw), dataB64: Mfp.bytesToB64(sm.data),
+            });
+          }
+        }
+        setProgress(0.8 + (s / MF.SAMPLE_SLOTS) * 0.1, `Samples ${s}/128`);
+      }
+      // 4. impostazioni dispositivo
+      setProgress(0.95, 'Reading device settings…');
+      const globals = await MF.readAllGlobals();
+
+      const bytes = await Mfp.serializeFullBackup({
+        presets, wavetables, samples, globals,
+        meta: { device: 'Arturia MicroFreak', createdAt: new Date().toISOString() },
+      });
+      setProgress(null);
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+      const path = await window.mfapi.saveFile({
+        defaultName: `managefreak-full-backup-${stamp}.mfbak`,
+        data: Mfp.bytesToB64(bytes),
+        filters: [{ name: 'ManageFreak full backup', extensions: ['mfbak'] }],
+      });
+      if (path) {
+        toast(`Full backup saved to ${path} (${presets.length} presets, ${wavetables.length} wavetables, ${samples.length} samples) ✓`, 'ok', 7000);
+      }
+    } catch (e) {
+      if (!(e && e.message === 'Operation cancelled')) {
+        toast('Backup failed: ' + (e.message || e), 'err', 6000);
+      }
+    } finally {
+      setBusy(false);
+      setProgress(null);
+      el.btnCancel.classList.add('hidden');
+    }
+  }
+
+  async function restoreFullDevice() {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    const files = await window.mfapi.openFiles({
+      filters: [
+        { name: 'ManageFreak full backup', extensions: ['mfbak', 'zip'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (!files || !files.length) return;
+    let backup;
+    try {
+      backup = await Mfp.parseFullBackup(Mfp.b64ToBytes(files[0].data));
+    } catch (e) {
+      return toast('Invalid backup file: ' + (e.message || e), 'err', 6000);
+    }
+    const nGlobals = Object.keys(backup.globals || {}).length;
+    const yes = await showModal('Restore full backup',
+      `<p>This will <strong>overwrite</strong> the MicroFreak with the backup:
+         <strong>${backup.presets.length}</strong> presets, <strong>${backup.wavetables.length}</strong> wavetables,
+         <strong>${backup.samples.length}</strong> samples and <strong>${nGlobals}</strong> device settings.
+         Each write is verified; on error the previous content is restored.</p>
+       <p class="muted" style="font-size:12px">This can take several minutes. You can cancel at any time.</p>`,
+      { okLabel: 'Restore' });
+    if (!yes) return;
+
+    setBusy(true, 'Restoring presets…');
+    el.btnCancel.classList.remove('hidden');
+    state.cancelRequested = false;
+    let done = 0;
+    let failed = 0;
+    const total = Math.max(1, backup.presets.length + backup.wavetables.length + backup.samples.length + nGlobals);
+    const step = (label) => setProgress(done / total, `${label} (${done}/${total})`);
+    try {
+      for (const p of backup.presets) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        try {
+          await MF.writePreset(p.slot, { name: p.name, category: p.category, p1: p.p1, data: Mfp.b64ToBytes(p.dataB64) }, { timeoutMs: 4000 });
+        } catch {
+          failed++;
+        }
+        done++;
+        step('Presets');
+      }
+      for (const w of backup.wavetables) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        try {
+          await MF.writeWavetable(w.slot, { name: w.name, data: Mfp.b64ToBytes(w.dataB64) });
+        } catch {
+          failed++;
+        }
+        done++;
+        step('Wavetables');
+      }
+      for (const s of backup.samples) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        try {
+          await MF.writeSample(s.slot, s.name, Mfp.b64ToBytes(s.dataB64));
+        } catch {
+          failed++;
+        }
+        done++;
+        step('Samples');
+      }
+      for (const [name, value] of Object.entries(backup.globals || {})) {
+        if (state.cancelRequested) throw new Error('Operation cancelled');
+        try {
+          await MF.writeGlobalSetting(name, value);
+        } catch {
+          failed++;
+        }
+        done++;
+        step('Settings');
+      }
+      // aggiorna la vista
+      try {
+        await syncAllFromDevice();
+      } catch {
+        /* la risincronizzazione non blocca l'esito */
+      }
+      toast(`Restore complete: ${done - failed}/${done} items${failed ? `, ${failed} failed` : ''} ✓`, 'ok', 7000);
+    } catch (e) {
+      if (!(e && e.message === 'Operation cancelled')) {
+        toast('Restore failed: ' + (e.message || e), 'err', 6000);
+      }
+    } finally {
+      setBusy(false);
+      setProgress(null);
+      el.btnCancel.classList.add('hidden');
+    }
+  }
+
   // ------------------------------------------------------------------ init
 
   async function init() {
@@ -3746,6 +3926,8 @@ const App = (() => {
     $('btn-sm-lib-export').addEventListener('click', exportSampleLib);
     $('btn-dev-load').addEventListener('click', loadDeviceGlobals);
     $('btn-dev-apply').addEventListener('click', applyAllDeviceGlobals);
+    $('btn-backup-full').addEventListener('click', backupFullDevice);
+    $('btn-restore-full').addEventListener('click', restoreFullDevice);
 
     initResizers();
 

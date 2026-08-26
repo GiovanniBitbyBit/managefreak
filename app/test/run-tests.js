@@ -1106,6 +1106,47 @@ async function test(name, fn) {
     assert.throws(() => Mfp.wavToSample(tooLong, 'X'), /24 s/);
   });
 
+  await test('wavToWavetable: risampla, taglia e ripete fino a 8192 campioni', () => {
+    // 16000 Hz con 4096 campioni → risampla a 32 kHz → 8192 campioni (16384 byte)
+    const pcm16 = new Uint8Array(8192);
+    for (let i = 0; i < 8192; i++) pcm16[i] = (i * 3) & 0xff;
+    const wav16 = makeWav({ rate: 16000, data: pcm16 });
+    const r1 = Mfp.wavToWavetable(wav16, 'Resampled');
+    assert.strictEqual(r1.data.length, 16384);
+    assert.strictEqual(r1.name, 'Resampled');
+    // 32 kHz con 12000 campioni → taglia ai primi 8192
+    const long = makeWav({ rate: 32000, data: new Uint8Array(24000) });
+    const r2 = Mfp.wavToWavetable(long, 'Long');
+    assert.strictEqual(r2.data.length, 16384);
+    // 32 kHz con 1024 campioni → ripete ciclicamente fino a 8192
+    const short = makeWav({ rate: 32000, data: new Uint8Array(2048) });
+    const r3 = Mfp.wavToWavetable(short, 'Short');
+    assert.strictEqual(r3.data.length, 16384);
+    // i primi 1024 campioni dell'originale compaiono 8 volte (loop perfetto)
+    const orig = new Uint8Array(2048);
+    for (let i = 0; i < 2048; i++) orig[i] = (i * 3) & 0xff;
+    const rep = new Uint8Array(16384);
+    for (let k = 0; k < 8; k++) rep.set(orig, k * 2048);
+    assert.deepStrictEqual(Array.from(r3.data), Array.from(rep));
+  });
+
+  await test('backup completo: round-trip .mfbak (zip)', async () => {
+    const presets = [{ slot: 1, name: 'A', category: 3, p1: 0, dataB64: 'QUJD' }];
+    const wavetables = [{ slot: 2, name: 'W', dataB64: 'V0FW' }];
+    const samples = [{ slot: 3, name: 'S', sizeBytes: 100, checksum: 42, headerB64: 'SEVS', dataB64: 'REFUQQ==' }];
+    const globals = { 'keyboard.root_note': 9, 'midi.channel_in': 0 };
+    const bytes = await Mfp.serializeFullBackup({ presets, wavetables, samples, globals, meta: { device: 'x' } });
+    const parsed = await Mfp.parseFullBackup(bytes);
+    assert.strictEqual(parsed.manifest.format, 'managefreak-full-backup');
+    assert.strictEqual(parsed.manifest.counts.presets, 1);
+    assert.deepStrictEqual(parsed.presets, presets);
+    assert.deepStrictEqual(parsed.wavetables, wavetables);
+    assert.deepStrictEqual(parsed.samples, samples);
+    assert.deepStrictEqual(parsed.globals, globals);
+    // file non valido → errore (zip o formato)
+    await assert.rejects(() => Mfp.parseFullBackup(new Uint8Array(64)), /Invalid ZIP archive|Not a ManageFreak/);
+  });
+
   // ================================================================== FINE
   console.log('');
   console.log(`Risultato: ${pass} test superati, ${fail} falliti.`);

@@ -606,12 +606,26 @@ const Mfp = (() => {
     return out;
   }
 
-  /** WAV → wavetable (mono PCM16, 32000 Hz, esattamente 8192 campioni). */
+  /** WAV → wavetable: mono PCM16, risampla a 32 kHz, taglia/ripete fino a 8192 campioni. */
   function wavToWavetable(bytes, name) {
     const wav = parseWav(bytes);
-    if (wav.sampleRate !== MFW_WAV_RATE) throw new Error(`Wavetable WAV must be ${MFW_WAV_RATE} Hz (got ${wav.sampleRate})`);
-    if (wav.frames !== MFW_WAV_FRAMES) throw new Error(`Wavetable WAV must contain exactly ${MFW_WAV_FRAMES} samples (got ${wav.frames})`);
-    return { name: (name || 'Wavetable').slice(0, 15), data: wav.data };
+    let data = resamplePcm16(wav.data, wav.sampleRate, MFW_WAV_RATE);
+    const targetFrames = 8192;
+    const curFrames = Math.floor(data.length / 2);
+    if (curFrames > targetFrames) {
+      data = data.subarray(0, targetFrames * 2);
+    } else if (curFrames < targetFrames) {
+      // ripete ciclicamente il materiale fino a riempire 8192 campioni
+      const out = new Uint8Array(targetFrames * 2);
+      let off = 0;
+      while (off < out.length) {
+        const take = Math.min(data.length, out.length - off);
+        out.set(data.subarray(0, take), off);
+        off += take;
+      }
+      data = out;
+    }
+    return { name: (name || 'Wavetable').slice(0, 15), data };
   }
 
   /** WAV → sample (mono PCM16, risampla a 32 kHz, max 24 s). */
@@ -623,6 +637,54 @@ const Mfp = (() => {
       throw new Error('Sample longer than 24 s at 32 kHz');
     }
     return { name: (name || 'Sample').slice(0, 12), data };
+  }
+
+  // -------------------------------------------------------------------------
+  // Backup completo del dispositivo: ZIP con manifest + preset/wavetable/
+  // sample/device JSON (tutti i corpi in base64)
+  // -------------------------------------------------------------------------
+
+  async function serializeFullBackup({ presets = [], wavetables = [], samples = [], globals = {}, meta = {} } = {}) {
+    const entries = [
+      {
+        name: 'manifest.json',
+        data: te.encode(JSON.stringify({
+          format: 'managefreak-full-backup',
+          version: 1,
+          ...meta,
+          counts: {
+            presets: presets.length,
+            wavetables: wavetables.length,
+            samples: samples.length,
+            globals: Object.keys(globals).length,
+          },
+        }, null, 1)),
+      },
+      { name: 'presets.json', data: te.encode(JSON.stringify({ entries: presets })) },
+      { name: 'wavetables.json', data: te.encode(JSON.stringify({ entries: wavetables })) },
+      { name: 'samples.json', data: te.encode(JSON.stringify({ entries: samples })) },
+      { name: 'device.json', data: te.encode(JSON.stringify({ globals })) },
+    ];
+    return writeZip(entries);
+  }
+
+  async function parseFullBackup(bytes) {
+    const entries = await readZip(bytes);
+    const get = (name) => {
+      const e = entries.find((x) => x.name === name);
+      return e ? JSON.parse(bytesToText(e.data)) : null;
+    };
+    const manifest = get('manifest.json');
+    if (!manifest || manifest.format !== 'managefreak-full-backup') {
+      throw new Error('Not a ManageFreak full backup');
+    }
+    return {
+      manifest,
+      presets: (get('presets.json') || {}).entries || [],
+      wavetables: (get('wavetables.json') || {}).entries || [],
+      samples: (get('samples.json') || {}).entries || [],
+      globals: (get('device.json') || {}).globals || {},
+    };
   }
 
   return {
@@ -653,6 +715,8 @@ const Mfp = (() => {
     resamplePcm16,
     wavToWavetable,
     wavToSample,
+    serializeFullBackup,
+    parseFullBackup,
   };
 })();
 

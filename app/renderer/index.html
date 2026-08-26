@@ -58,6 +58,14 @@
         <button id="btn-sm-lib-export" class="btn wide">⭳ Export all (.mfsample)</button>
         <p class="hint">Samples stored on this computer (mono, resampled to 32 kHz, max 24 s each).</p>
       </div>
+
+      <div id="sidebar-backup" class="sidebar-pane">
+        <h3>Full device backup</h3>
+        <button id="btn-backup-full" class="btn wide">⭳ Backup whole MicroFreak</button>
+        <button id="btn-restore-full" class="btn wide">⮍ Restore whole MicroFreak</button>
+        <p class="hint">One file with all 512 presets, wavetables, samples and device settings.
+          Restore overwrites the device; every write is verified.</p>
+      </div>
     </aside>
 
     <div class="resizer" data-resize="side" title="Drag to resize"></div>
@@ -118,7 +126,8 @@
                 </div>
               </div>
               <p class="hint">16 user wavetable slots on the MicroFreak (used by the
-                 <strong>WaveUser</strong> oscillator engine).</p>
+                 <strong>WaveUser</strong> oscillator engine). Any mono WAV is resampled to
+                 32 kHz and 8192 samples (32 cycles × 256).</p>
             </div>
             <div id="wt-list" class="wt-list"></div>
           </div>
