@@ -31,6 +31,8 @@ const App = (() => {
     samples: null,         // header dei 128 slot sample
     sampleStats: null,     // {usedMs, freeMs, capacityMs, ...}
     deviceGlobals: null,   // {nomeGlobal: valore}
+    wtLib: [],             // libreria PC wavetable: [{id, name, dataB64, addedAt, source}]
+    smLib: [],             // libreria PC sample: [{id, name, dataB64, sizeBytes, durationMs, ...}]
     busy: false,
     cancelRequested: false,
     dragEntryId: null,
@@ -2263,8 +2265,21 @@ const App = (() => {
     for (const [t, id] of Object.entries(views)) {
       $('' + id).classList.toggle('hidden', t !== tab);
     }
-    if (tab === 'wavetables' && !state.wavetables && Midi.isOpen()) readWavetableInventory();
-    if (tab === 'samples' && !state.samples && Midi.isOpen()) readSampleInventory();
+    // sidebar contestuale: presets/device → librerie preset; wavetable/sample → librerie dedicate
+    const libTarget = tab === 'wavetables' ? 'sidebar-wavetables' : tab === 'samples' ? 'sidebar-samples' : 'sidebar-library';
+    for (const id of ['sidebar-library', 'sidebar-wavetables', 'sidebar-samples']) {
+      $('' + id).classList.toggle('hidden', id !== libTarget);
+    }
+    if (tab === 'wavetables') {
+      renderWavetableSidebar();
+      renderWavetablePc();
+      if (!state.wavetables && Midi.isOpen()) readWavetableInventory();
+    }
+    if (tab === 'samples') {
+      renderSampleSidebar();
+      renderSamplePc();
+      if (!state.samples && Midi.isOpen()) readSampleInventory();
+    }
     if (tab === 'device' && !state.deviceGlobals && Midi.isOpen()) loadDeviceGlobals();
   }
 
@@ -2315,6 +2330,54 @@ const App = (() => {
         else if (act === 'clear') clearWavetableSlot(slot);
       });
     });
+    // drag&drop: PC → dispositivo (upload) e dispositivo → PC (archivia)
+    grid.querySelectorAll('.wt-card').forEach((card) => {
+      const slot = parseInt(card.dataset.slot, 10);
+      const h = list[slot - 1];
+      if (h && !h.empty) {
+        card.draggable = true;
+        card.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData('application/x-managefreak-wt-slot', String(slot));
+          e.dataTransfer.setData('text/plain', String(slot));
+          e.dataTransfer.effectAllowed = 'copyMove';
+          card.classList.add('dragging');
+        });
+        card.addEventListener('dragend', () => card.classList.remove('dragging'));
+      }
+      card.addEventListener('dragover', (e) => {
+        if (!e.dataTransfer.types.includes('application/x-managefreak-wt')) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        card.classList.add('drop-target');
+      });
+      card.addEventListener('dragleave', () => card.classList.remove('drop-target'));
+      card.addEventListener('drop', (e) => {
+        e.preventDefault();
+        card.classList.remove('drop-target');
+        const idStr = e.dataTransfer.getData('application/x-managefreak-wt');
+        if (!idStr) return;
+        const entry = state.wtLib.find((x) => x.id === parseInt(idStr, 10));
+        if (entry) uploadWavetableEntryToSlot(entry, slot);
+      });
+    });
+    const pcList = $('wt-pc-list');
+    if (pcList && !pcList.dataset.bound) {
+      pcList.dataset.bound = '1';
+      pcList.addEventListener('dragover', (e) => {
+        if (e.dataTransfer.types.includes('application/x-managefreak-wt-slot')) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+          pcList.classList.add('drop-target');
+        }
+      });
+      pcList.addEventListener('dragleave', () => pcList.classList.remove('drop-target'));
+      pcList.addEventListener('drop', (e) => {
+        e.preventDefault();
+        pcList.classList.remove('drop-target');
+        const slotStr = e.dataTransfer.getData('application/x-managefreak-wt-slot');
+        if (slotStr) readWavetableSlotToPc(parseInt(slotStr, 10));
+      });
+    }
   }
 
   async function readWavetableToPC(slot) {
@@ -2482,6 +2545,54 @@ const App = (() => {
         else if (act === 'clear') clearSampleSlot(slot);
       });
     });
+    // drag&drop: PC → dispositivo (upload) e dispositivo → PC (archivia)
+    list.querySelectorAll('.sm-row').forEach((row) => {
+      const slot = parseInt(row.dataset.slot, 10);
+      const h = items[slot - 1];
+      if (h && !h.empty) {
+        row.draggable = true;
+        row.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData('application/x-managefreak-sm-slot', String(slot));
+          e.dataTransfer.setData('text/plain', String(slot));
+          e.dataTransfer.effectAllowed = 'copyMove';
+          row.classList.add('dragging');
+        });
+        row.addEventListener('dragend', () => row.classList.remove('dragging'));
+      }
+      row.addEventListener('dragover', (e) => {
+        if (!e.dataTransfer.types.includes('application/x-managefreak-sm')) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        row.classList.add('drop-target');
+      });
+      row.addEventListener('dragleave', () => row.classList.remove('drop-target'));
+      row.addEventListener('drop', (e) => {
+        e.preventDefault();
+        row.classList.remove('drop-target');
+        const idStr = e.dataTransfer.getData('application/x-managefreak-sm');
+        if (!idStr) return;
+        const entry = state.smLib.find((x) => x.id === parseInt(idStr, 10));
+        if (entry) uploadSampleEntryToSlot(entry, slot);
+      });
+    });
+    const pcList = $('sm-pc-list');
+    if (pcList && !pcList.dataset.bound) {
+      pcList.dataset.bound = '1';
+      pcList.addEventListener('dragover', (e) => {
+        if (e.dataTransfer.types.includes('application/x-managefreak-sm-slot')) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+          pcList.classList.add('drop-target');
+        }
+      });
+      pcList.addEventListener('dragleave', () => pcList.classList.remove('drop-target'));
+      pcList.addEventListener('drop', (e) => {
+        e.preventDefault();
+        pcList.classList.remove('drop-target');
+        const slotStr = e.dataTransfer.getData('application/x-managefreak-sm-slot');
+        if (slotStr) readSampleSlotToPc(parseInt(slotStr, 10));
+      });
+    }
   }
 
   async function readSampleToPC(slot) {
@@ -2698,6 +2809,431 @@ const App = (() => {
     }
   }
 
+  // ------------------------------------------------------------------ librerie PC: wavetable e sample
+
+  const _libId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+  async function loadJsonLib(name, fallback) {
+    try {
+      const exists = await window.mfapi.fileExists(name);
+      if (!exists) return fallback;
+      const b64 = await window.mfapi.readFile(name);
+      return JSON.parse(Mfp.bytesToText(Mfp.b64ToBytes(b64)));
+    } catch {
+      return fallback;
+    }
+  }
+
+  async function saveJsonLib(name, obj) {
+    const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(obj))));
+    await window.mfapi.writeFile(name, b64);
+  }
+
+  async function loadWavetableLib() {
+    const data = await loadJsonLib('wavetables.json', { version: 1, entries: [] });
+    state.wtLib = Array.isArray(data && data.entries) ? data.entries : [];
+  }
+
+  async function saveWavetableLib() {
+    await saveJsonLib('wavetables.json', { version: 1, entries: state.wtLib });
+  }
+
+  async function loadSampleLib() {
+    const data = await loadJsonLib('samples.json', { version: 1, entries: [] });
+    state.smLib = Array.isArray(data && data.entries) ? data.entries : [];
+  }
+
+  async function saveSampleLib() {
+    await saveJsonLib('samples.json', { version: 1, entries: state.smLib });
+  }
+
+  function renderWavetableSidebar() {
+    const list = $('wt-lib-list');
+    if (!list) return;
+    list.innerHTML = state.wtLib.length
+      ? state.wtLib.map((e) => `<div class="lib-item-row" data-wt-lib="${e.id}">
+          <span class="li-name" title="${esc(e.name)}">${esc(e.name)}</span>
+          <span class="li-x" data-del="${e.id}" title="Remove from PC library">✕</span>
+        </div>`).join('')
+      : '<div class="hint" style="padding:6px">No wavetables on this PC yet.</div>';
+    list.querySelectorAll('[data-del]').forEach((x) => {
+      x.addEventListener('click', () => deleteWavetableFromLib(parseInt(x.dataset.del, 10)));
+    });
+  }
+
+  function renderSampleSidebar() {
+    const list = $('sm-lib-list');
+    if (!list) return;
+    list.innerHTML = state.smLib.length
+      ? state.smLib.map((e) => `<div class="lib-item-row" data-sm-lib="${e.id}">
+          <span class="li-name" title="${esc(e.name)}">${esc(e.name)}</span>
+          <span class="li-meta">${fmtMs(e.durationMs || 0)}</span>
+          <span class="li-x" data-del="${e.id}" title="Remove from PC library">✕</span>
+        </div>`).join('')
+      : '<div class="hint" style="padding:6px">No samples on this PC yet.</div>';
+    list.querySelectorAll('[data-del]').forEach((x) => {
+      x.addEventListener('click', () => deleteSampleFromLib(parseInt(x.dataset.del, 10)));
+    });
+  }
+
+  function renderWavetablePc() {
+    const list = $('wt-pc-list');
+    if (!list) return;
+    const count = $('wt-lib-count');
+    if (count) count.textContent = `(${state.wtLib.length})`;
+    list.innerHTML = state.wtLib.length
+      ? state.wtLib.map((e) => `<div class="pc-item" draggable="true" data-id="${e.id}">
+          <div>
+            <div class="pc-name" title="${esc(e.name)}">${esc(e.name)}</div>
+            <div class="pc-meta">${e.addedAt ? new Date(e.addedAt).toLocaleDateString() : ''}</div>
+          </div>
+          <span class="pc-actions">
+            <button class="btn small" data-act="dl" title="Download .mfw">⭳</button>
+            <button class="btn small" data-act="send" title="Send to MicroFreak">➡</button>
+            <button class="btn small" data-act="del" title="Remove from PC library">✕</button>
+          </span>
+        </div>`).join('')
+      : `<div class="pc-empty">The PC library is empty. Import a WAV, .mfw or .mfwz,
+         or drag a device slot here.</div>`;
+    list.querySelectorAll('.pc-item').forEach((item) => {
+      const id = parseInt(item.dataset.id, 10);
+      item.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('application/x-managefreak-wt', String(id));
+        e.dataTransfer.setData('text/plain', String(id));
+        e.dataTransfer.effectAllowed = 'copyMove';
+        item.classList.add('dragging');
+      });
+      item.addEventListener('dragend', () => item.classList.remove('dragging'));
+      item.querySelectorAll('[data-act]').forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const act = btn.dataset.act;
+          if (act === 'dl') downloadWavetableEntry(id);
+          else if (act === 'send') sendWavetableToDevice(id);
+          else if (act === 'del') deleteWavetableFromLib(id);
+        });
+      });
+    });
+  }
+
+  function renderSamplePc() {
+    const list = $('sm-pc-list');
+    if (!list) return;
+    const count = $('sm-lib-count');
+    if (count) count.textContent = `(${state.smLib.length})`;
+    list.innerHTML = state.smLib.length
+      ? state.smLib.map((e) => `<div class="pc-item" draggable="true" data-id="${e.id}">
+          <div>
+            <div class="pc-name" title="${esc(e.name)}">${esc(e.name)}</div>
+            <div class="pc-meta">${fmtMs(e.durationMs || 0)} · ${((e.dataB64 ? e.dataB64.length * 3 / 4 : 0) / 1024).toFixed(0)} KB</div>
+          </div>
+          <span class="pc-actions">
+            <button class="btn small" data-act="dl" title="Download .mfsample">⭳</button>
+            <button class="btn small" data-act="send" title="Send to MicroFreak">➡</button>
+            <button class="btn small" data-act="del" title="Remove from PC library">✕</button>
+          </span>
+        </div>`).join('')
+      : `<div class="pc-empty">The PC library is empty. Import a WAV or .mfsample,
+         or drag a device slot here.</div>`;
+    list.querySelectorAll('.pc-item').forEach((item) => {
+      const id = parseInt(item.dataset.id, 10);
+      item.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('application/x-managefreak-sm', String(id));
+        e.dataTransfer.setData('text/plain', String(id));
+        e.dataTransfer.effectAllowed = 'copyMove';
+        item.classList.add('dragging');
+      });
+      item.addEventListener('dragend', () => item.classList.remove('dragging'));
+      item.querySelectorAll('[data-act]').forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const act = btn.dataset.act;
+          if (act === 'dl') downloadSampleEntry(id);
+          else if (act === 'send') sendSampleToDevice(id);
+          else if (act === 'del') deleteSampleFromLib(id);
+        });
+      });
+    });
+  }
+
+  async function importWavetableToPc() {
+    const files = await window.mfapi.openFiles({
+      filters: [
+        { name: 'WAV / .mfw / .mfwz', extensions: ['wav', 'mfw', 'mfwz'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (!files || !files.length) return;
+    let added = 0;
+    const errors = [];
+    for (const f of files) {
+      try {
+        const bytes = Mfp.b64ToBytes(f.data);
+        const ext = f.name.split('.').pop().toLowerCase();
+        let wt;
+        if (ext === 'wav') wt = Mfp.wavToWavetable(bytes, f.name.replace(/\.[^.]+$/, ''));
+        else if (ext === 'mfw') wt = Mfp.parseMfw(bytes);
+        else if (ext === 'mfwz') wt = await Mfp.parseMfwz(bytes);
+        else throw new Error('Unsupported extension: .' + ext);
+        state.wtLib.push({
+          id: _libId(),
+          name: (wt.name || 'Wavetable').slice(0, 15),
+          dataB64: Mfp.bytesToB64(wt.data),
+          addedAt: Date.now(),
+          source: f.name,
+        });
+        added++;
+      } catch (e) {
+        errors.push(`${f.name}: ${e.message || e}`);
+      }
+    }
+    await saveWavetableLib();
+    renderWavetableSidebar();
+    renderWavetablePc();
+    if (added) toast(`Added ${added} wavetable${added > 1 ? 's' : ''} to the PC library ✓`, 'ok');
+    if (errors.length) toast('Some files were not imported: ' + errors.join(' — '), 'err', 7000);
+  }
+
+  async function importSampleToPc() {
+    const files = await window.mfapi.openFiles({
+      filters: [
+        { name: 'WAV / .mfsample', extensions: ['wav', 'mfsample'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (!files || !files.length) return;
+    let added = 0;
+    const errors = [];
+    for (const f of files) {
+      try {
+        const bytes = Mfp.b64ToBytes(f.data);
+        const ext = f.name.split('.').pop().toLowerCase();
+        let name;
+        let data;
+        if (ext === 'wav') {
+          const s = Mfp.wavToSample(bytes, f.name.replace(/\.[^.]+$/, ''));
+          name = s.name;
+          data = s.data;
+        } else if (ext === 'mfsample') {
+          const m = Mfp.parseMsample(bytes);
+          name = (m.header && Array.from(m.header.subarray(10, 23)).filter((c) => c > 0).map((c) => String.fromCharCode(c)).join('')) || 'Sample';
+          data = m.data;
+        } else {
+          throw new Error('Unsupported extension: .' + ext);
+        }
+        if (!data || data.length < 2 || data.length > MF.SAMPLE_MAX_BYTES) {
+          throw new Error('Sample must be 2..' + MF.SAMPLE_MAX_BYTES + ' bytes');
+        }
+        state.smLib.push({
+          id: _libId(),
+          name: name.slice(0, 12),
+          dataB64: Mfp.bytesToB64(data),
+          sizeBytes: data.length,
+          durationMs: Math.round((data.length / 2 / 32000) * 1000),
+          addedAt: Date.now(),
+          source: f.name,
+        });
+        added++;
+      } catch (e) {
+        errors.push(`${f.name}: ${e.message || e}`);
+      }
+    }
+    await saveSampleLib();
+    renderSampleSidebar();
+    renderSamplePc();
+    if (added) toast(`Added ${added} sample${added > 1 ? 's' : ''} to the PC library ✓`, 'ok');
+    if (errors.length) toast('Some files were not imported: ' + errors.join(' — '), 'err', 7000);
+  }
+
+  async function exportWavetableLib() {
+    if (!state.wtLib.length) return toast('The wavetable library is empty.', 'err');
+    const files = state.wtLib.map((e) => ({
+      name: `${safeFile(e.name)}.mfw`,
+      dataB64: e.dataB64,
+    }));
+    const dir = await window.mfapi.exportFolder(files);
+    if (dir) toast(`Exported ${files.length} wavetables to ${dir}`, 'ok');
+  }
+
+  async function exportSampleLib() {
+    if (!state.smLib.length) return toast('The sample library is empty.', 'err');
+    const files = state.smLib.map((e) => ({
+      name: `${safeFile(e.name)}.mfsample`,
+      dataB64: e.dataB64,
+    }));
+    const dir = await window.mfapi.exportFolder(files);
+    if (dir) toast(`Exported ${files.length} samples to ${dir}`, 'ok');
+  }
+
+  async function downloadWavetableEntry(id) {
+    const entry = state.wtLib.find((e) => e.id === id);
+    if (!entry) return;
+    await window.mfapi.saveFile({
+      defaultName: `${safeFile(entry.name)}.mfw`,
+      data: entry.dataB64,
+      filters: [{ name: 'MicroFreak wavetable', extensions: ['mfw'] }],
+    });
+  }
+
+  async function downloadSampleEntry(id) {
+    const entry = state.smLib.find((e) => e.id === id);
+    if (!entry) return;
+    const bytes = Mfp.b64ToBytes(entry.dataB64);
+    const header = new Uint8Array(28);
+    header[4] = bytes.length & 0xff;
+    header[5] = (bytes.length >> 8) & 0xff;
+    header[6] = (bytes.length >> 16) & 0xff;
+    header[7] = (bytes.length >> 24) & 0xff;
+    // checksum ricalcolato dal corpo
+    let sum = 0;
+    for (let i = 0; i + 1 < bytes.length; i += 2) sum = (sum + (bytes[i] | (bytes[i + 1] << 8))) & 0xffff;
+    header[8] = sum & 0xff;
+    header[9] = (sum >> 8) & 0xff;
+    for (let i = 0; i < entry.name.length && i < 12; i++) header[10 + i] = entry.name.charCodeAt(i) & 0x7f;
+    header[23] = 0;
+    await window.mfapi.saveFile({
+      defaultName: `${safeFile(entry.name)}.mfsample`,
+      data: Mfp.bytesToB64(Mfp.serializeMsample(header, bytes)),
+      filters: [{ name: 'MicroFreak sample backup', extensions: ['mfsample'] }],
+    });
+  }
+
+  async function deleteWavetableFromLib(id) {
+    state.wtLib = state.wtLib.filter((e) => e.id !== id);
+    await saveWavetableLib();
+    renderWavetableSidebar();
+    renderWavetablePc();
+  }
+
+  async function deleteSampleFromLib(id) {
+    state.smLib = state.smLib.filter((e) => e.id !== id);
+    await saveSampleLib();
+    renderSampleSidebar();
+    renderSamplePc();
+  }
+
+  async function chooseSlotModal(title, max, firstFree) {
+    const ok = await showModal(title,
+      `<div class="field"><label>Slot (1–${max})</label>
+         <input id="m-slot" type="number" min="1" max="${max}" value="${firstFree || 1}" /></div>`,
+      {
+        okLabel: 'Send',
+        onOk: () => {
+          const v = parseInt($('m-slot').value, 10);
+          if (!v || v < 1 || v > max) {
+            toast(`Invalid slot (1–${max}).`, 'err');
+            return false;
+          }
+          $('m-slot').dataset.slot = String(v);
+        },
+      });
+    if (!ok) return null;
+    return parseInt($('m-slot').dataset.slot, 10);
+  }
+
+  async function sendWavetableToDevice(id) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    const entry = state.wtLib.find((e) => e.id === id);
+    if (!entry) return;
+    const firstFree = (state.wavetables || []).findIndex((h) => !h || h.empty) + 1 || 1;
+    const slot = await chooseSlotModal('Send wavetable to MicroFreak', 16, firstFree);
+    if (!slot) return;
+    await uploadWavetableEntryToSlot(entry, slot);
+  }
+
+  async function uploadWavetableEntryToSlot(entry, slot) {
+    setBusy(true, `Uploading wavetable to slot ${slot}…`);
+    try {
+      await MF.writeWavetable(slot, { name: entry.name, data: Mfp.b64ToBytes(entry.dataB64) });
+      if (state.wavetables) state.wavetables[slot - 1] = await MF.readWavetableHeader(slot);
+      renderWavetables();
+      toast(`Wavetable "${entry.name}" written to slot ${slot} ✓`, 'ok');
+    } catch (e) {
+      toast('Wavetable upload failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendSampleToDevice(id) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    const entry = state.smLib.find((e) => e.id === id);
+    if (!entry) return;
+    const firstFree = (state.samples || []).findIndex((h) => !h || h.empty) + 1 || 1;
+    const slot = await chooseSlotModal('Send sample to MicroFreak', 128, firstFree);
+    if (!slot) return;
+    await uploadSampleEntryToSlot(entry, slot);
+  }
+
+  async function uploadSampleEntryToSlot(entry, slot) {
+    setBusy(true, `Uploading sample to slot ${slot}…`);
+    try {
+      await MF.writeSample(slot, entry.name, Mfp.b64ToBytes(entry.dataB64));
+      if (state.samples) state.samples[slot - 1] = await MF.readSampleHeader(slot);
+      try {
+        state.sampleStats = await MF.readSampleStats();
+      } catch {
+        /* stats non disponibili */
+      }
+      renderSamples();
+      toast(`Sample "${entry.name}" written to slot ${slot} ✓`, 'ok');
+    } catch (e) {
+      toast('Sample upload failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function readWavetableSlotToPc(slot) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    setBusy(true, `Reading wavetable slot ${slot}…`);
+    try {
+      const wt = await MF.readWavetable(slot);
+      if (!wt.data) return toast(`Wavetable slot ${slot} is empty.`, 'err');
+      state.wtLib.push({
+        id: _libId(),
+        name: (wt.name || 'Wavetable').slice(0, 15),
+        dataB64: Mfp.bytesToB64(wt.data),
+        addedAt: Date.now(),
+        source: `MicroFreak slot ${slot}`,
+      });
+      await saveWavetableLib();
+      renderWavetableSidebar();
+      renderWavetablePc();
+      toast(`Wavetable "${wt.name}" stored in the PC library ✓`, 'ok');
+    } catch (e) {
+      toast('Wavetable read failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function readSampleSlotToPc(slot) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    setBusy(true, `Reading sample slot ${slot}…`);
+    try {
+      const s = await MF.readSample(slot);
+      if (!s.data) return toast(`Sample slot ${slot} is empty.`, 'err');
+      state.smLib.push({
+        id: _libId(),
+        name: s.name.slice(0, 12) || 'Sample',
+        dataB64: Mfp.bytesToB64(s.data),
+        sizeBytes: s.data.length,
+        durationMs: Math.round((s.data.length / 2 / 32000) * 1000),
+        addedAt: Date.now(),
+        source: `MicroFreak slot ${slot}`,
+      });
+      await saveSampleLib();
+      renderSampleSidebar();
+      renderSamplePc();
+      toast(`Sample "${s.name}" stored in the PC library ✓`, 'ok');
+    } catch (e) {
+      toast('Sample read failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // ------------------------------------------------------------------ init
 
   async function init() {
@@ -2764,11 +3300,15 @@ const App = (() => {
       b.addEventListener('click', () => switchTab(b.dataset.tab));
     });
     $('btn-wt-read').addEventListener('click', readWavetableInventory);
-    $('btn-wt-import').addEventListener('click', () => importWavetableIntoSlot(null));
-    $('btn-wt-export-all').addEventListener('click', exportAllWavetables);
+    $('btn-wt-pc-import').addEventListener('click', importWavetableToPc);
+    $('btn-wt-pc-export').addEventListener('click', exportWavetableLib);
+    $('btn-wt-lib-import').addEventListener('click', importWavetableToPc);
+    $('btn-wt-lib-export').addEventListener('click', exportWavetableLib);
     $('btn-sm-read').addEventListener('click', readSampleInventory);
-    $('btn-sm-import').addEventListener('click', () => importSampleIntoSlot(null));
-    $('btn-sm-export-all').addEventListener('click', exportAllSamples);
+    $('btn-sm-pc-import').addEventListener('click', importSampleToPc);
+    $('btn-sm-pc-export').addEventListener('click', exportSampleLib);
+    $('btn-sm-lib-import').addEventListener('click', importSampleToPc);
+    $('btn-sm-lib-export').addEventListener('click', exportSampleLib);
     $('btn-dev-load').addEventListener('click', loadDeviceGlobals);
     $('btn-dev-apply').addEventListener('click', applyAllDeviceGlobals);
 
@@ -2975,9 +3515,15 @@ const App = (() => {
     document.title = `ManageFreak v${info.version}`;
 
     await Library.load();
+    await loadWavetableLib();
+    await loadSampleLib();
     renderLibrary();
     renderSelBar();
     renderDevice();
+    renderWavetableSidebar();
+    renderSampleSidebar();
+    renderWavetablePc();
+    renderSamplePc();
     showDetailEmpty();
 
     if (Midi.supported()) {

@@ -57,13 +57,21 @@ function createWindow() {
           if (tabBtns.length !== 4) issues.push('tab buttons missing (expected 4)');
           else {
             const idByTab = { presets: 'library-view', wavetables: 'wavetable-view', samples: 'samples-view', device: 'device-view' };
+            const sidebarByTab = { presets: 'sidebar-library', wavetables: 'sidebar-wavetables', samples: 'sidebar-samples', device: 'sidebar-library' };
             for (const btn of tabBtns) {
               btn.click();
               const view = document.getElementById(idByTab[btn.dataset.tab]);
               if (!view || view.classList.contains('hidden')) issues.push('tab view not shown: ' + btn.dataset.tab);
+              const side = document.getElementById(sidebarByTab[btn.dataset.tab]);
+              if (!side || side.classList.contains('hidden')) issues.push('sidebar not shown: ' + btn.dataset.tab);
             }
             tabBtns[0].click();
             if (document.getElementById('library-view').classList.contains('hidden')) issues.push('presets view not restored');
+            // split a due pannelli in wavetable e sample (PC a sinistra, dispositivo a destra)
+            for (const tab of ['wavetables', 'samples']) {
+              const view = document.getElementById(idByTab[tab]);
+              if (!view.querySelector('.pane-pc') || !view.querySelector('.pane-dev')) issues.push('pane split missing in ' + tab);
+            }
           }
           const libList = document.getElementById('lib-list');
           const catList = document.getElementById('cat-list');

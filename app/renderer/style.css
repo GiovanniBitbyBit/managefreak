@@ -864,3 +864,85 @@ select {
 @media (max-width: 1100px) {
   .dev-cols { grid-template-columns: 1fr; }
 }
+
+/* ---------------------------------------------------------------- split a due pannelli (wavetable/sample) */
+.pane-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: start;
+}
+.pane {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 12px;
+}
+.pane-pc { border-color: var(--border); }
+.pane-dev { border-color: var(--accent2); }
+.pane .tab-header { margin-bottom: 10px; }
+.pane .tab-header h2 { font-size: 14px; }
+
+.pc-list { display: flex; flex-direction: column; gap: 4px; }
+.pc-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+  font-size: 13px;
+  cursor: grab;
+}
+.pc-item.dragging { opacity: .5; }
+.pc-item .pc-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pc-item .pc-meta { font-size: 11px; color: var(--muted); }
+.pc-item .pc-actions { display: flex; gap: 4px; }
+.pc-empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 14px 8px;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+.pc-list.drop-target { outline: 2px dashed var(--accent2); outline-offset: -2px; }
+
+/* sidebar dedicata */
+#sidebar-wavetables .hint,
+#sidebar-samples .hint { font-size: 11px; color: var(--muted); margin-top: 8px; line-height: 1.4; }
+.lib-item-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.lib-item-row:hover { background: var(--bg2); }
+.lib-item-row .li-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lib-item-row .li-x {
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 4px;
+}
+.lib-item-row .li-x:hover { color: var(--red); }
+.lib-item-row .li-meta { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+@media (max-width: 1200px) {
+  .pane-split { grid-template-columns: 1fr; }
+}

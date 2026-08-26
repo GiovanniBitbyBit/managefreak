@@ -39,6 +39,25 @@
         <h3>Characteristics</h3>
         <div id="char-list"></div>
       </div>
+
+      <div id="sidebar-wavetables" class="sidebar-pane hidden">
+        <h3>Wavetable Library (PC)</h3>
+        <div id="wt-lib-list"></div>
+        <h3>Actions</h3>
+        <button id="btn-wt-lib-import" class="btn wide">Import WAV / .mfw / .mfwz</button>
+        <button id="btn-wt-lib-export" class="btn wide">⭳ Export all (.mfw)</button>
+        <p class="hint">Wavetables stored on this computer, ready to send to the MicroFreak
+          (mono PCM16, 32000 Hz, 8192 samples).</p>
+      </div>
+
+      <div id="sidebar-samples" class="sidebar-pane hidden">
+        <h3>Sample Library (PC)</h3>
+        <div id="sm-lib-list"></div>
+        <h3>Actions</h3>
+        <button id="btn-sm-lib-import" class="btn wide">Import WAV / .mfsample</button>
+        <button id="btn-sm-lib-export" class="btn wide">⭳ Export all (.mfsample)</button>
+        <p class="hint">Samples stored on this computer (mono, resampled to 32 kHz, max 24 s each).</p>
+      </div>
     </aside>
 
     <div class="resizer" data-resize="side" title="Drag to resize"></div>
@@ -75,42 +94,73 @@
       </div>
 
       <div id="wavetable-view" class="tab-view hidden">
-        <div class="tab-header">
-          <div class="tab-header-row">
-            <h2>Wavetables <span id="wt-count" class="muted"></span></h2>
-            <div class="tab-actions">
-              <button id="btn-wt-read" class="btn small">⬅ Read from MicroFreak</button>
-              <button id="btn-wt-import" class="btn small">Import WAV / .mfw / .mfwz</button>
-              <button id="btn-wt-export-all" class="btn small">⭳ Export all (.mfw)</button>
+        <div class="pane-split">
+          <div class="pane pane-pc" id="wt-pc-pane">
+            <div class="tab-header">
+              <div class="tab-header-row">
+                <h2>PC Library <span id="wt-lib-count" class="muted"></span></h2>
+                <div class="tab-actions">
+                  <button id="btn-wt-pc-import" class="btn small">Import WAV / .mfw / .mfwz</button>
+                  <button id="btn-wt-pc-export" class="btn small">⭳ Export all (.mfw)</button>
+                </div>
+              </div>
+              <p class="hint">Wavetables stored on this computer. Drag one onto a MicroFreak slot
+                 to upload it, or drag a device slot here to store it.</p>
             </div>
+            <div id="wt-pc-list" class="pc-list"></div>
           </div>
-          <p class="hint">16 user wavetable slots. Source WAV must be mono PCM16, 32000 Hz,
-             exactly 8192 samples (32 cycles × 256). The MicroFreak uses them with the
-             <strong>WaveUser</strong> oscillator engine.</p>
+          <div class="pane pane-dev" id="wt-dev-pane">
+            <div class="tab-header">
+              <div class="tab-header-row">
+                <h2>MicroFreak <span id="wt-count" class="muted"></span></h2>
+                <div class="tab-actions">
+                  <button id="btn-wt-read" class="btn small">⬅ Read from MicroFreak</button>
+                </div>
+              </div>
+              <p class="hint">16 user wavetable slots on the MicroFreak (used by the
+                 <strong>WaveUser</strong> oscillator engine).</p>
+            </div>
+            <div id="wt-grid" class="wt-grid"></div>
+          </div>
         </div>
-        <div id="wt-grid" class="wt-grid"></div>
       </div>
 
       <div id="samples-view" class="tab-view hidden">
-        <div class="tab-header">
-          <div class="tab-header-row">
-            <h2>Samples <span id="sm-count" class="muted"></span></h2>
-            <div class="tab-actions">
-              <button id="btn-sm-read" class="btn small">⬅ Read from MicroFreak</button>
-              <button id="btn-sm-import" class="btn small">Import WAV / .mfsample</button>
-              <button id="btn-sm-export-all" class="btn small">⭳ Export all (.mfsample)</button>
+        <div class="pane-split">
+          <div class="pane pane-pc" id="sm-pc-pane">
+            <div class="tab-header">
+              <div class="tab-header-row">
+                <h2>PC Library <span id="sm-lib-count" class="muted"></span></h2>
+                <div class="tab-actions">
+                  <button id="btn-sm-pc-import" class="btn small">Import WAV / .mfsample</button>
+                  <button id="btn-sm-pc-export" class="btn small">⭳ Export all (.mfsample)</button>
+                </div>
+              </div>
+              <p class="hint">Samples stored on this computer. Drag one onto a MicroFreak slot
+                 to upload it, or drag a device slot here to store it.</p>
             </div>
+            <div id="sm-pc-list" class="pc-list"></div>
           </div>
-          <div class="sample-stats">
-            <div class="mem-bar"><div id="sm-mem-fill"></div></div>
-            <span id="sm-mem-text" class="muted"></span>
+          <div class="pane pane-dev" id="sm-dev-pane">
+            <div class="tab-header">
+              <div class="tab-header-row">
+                <h2>MicroFreak <span id="sm-count" class="muted"></span></h2>
+                <div class="tab-actions">
+                  <button id="btn-sm-read" class="btn small">⬅ Read from MicroFreak</button>
+                </div>
+              </div>
+              <div class="sample-stats">
+                <div class="mem-bar"><div id="sm-mem-fill"></div></div>
+                <span id="sm-mem-text" class="muted"></span>
+              </div>
+              <p class="hint">128 sample slots (mono, 32 kHz). Total sample memory:
+                 <strong id="sm-cap-text">~3.5 min</strong>. Used by the <strong>Sample</strong>,
+                 <strong>Scan Grains</strong>, <strong>Cloud Grains</strong> and
+                 <strong>Hit Grains</strong> engines (firmware 5+).</p>
+            </div>
+            <div id="sm-list" class="sm-list"></div>
           </div>
-          <p class="hint">128 sample slots (mono, 32 kHz). Total sample memory:
-             <strong id="sm-cap-text">~3.5 min</strong>. Used by the <strong>Sample</strong>,
-             <strong>Scan Grains</strong>, <strong>Cloud Grains</strong> and
-             <strong>Hit Grains</strong> engines (firmware 5+).</p>
         </div>
-        <div id="sm-list" class="sm-list"></div>
       </div>
 
       <div id="device-view" class="tab-view hidden">
