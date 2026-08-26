@@ -12,6 +12,18 @@ of Arturia MCC files (`.mfp`, `.mbp`, `.mfpz`, `.mfprojz`, `.syx`).
 
 ---
 
+## Screenshots
+
+![Presets](screenshots/presets.png)
+
+![Wavetables](screenshots/wavetables.png)
+
+![Samples](screenshots/samples.png)
+
+![Device](screenshots/device.png)
+
+---
+
 ## Features
 
 ### Device
