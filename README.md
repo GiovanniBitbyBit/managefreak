@@ -175,6 +175,15 @@ work of:
 
 ---
 
+## Support
+
+ManageFreak is free and open source. If it saves you time (or sanity) compared to MIDI Control Center,
+consider buying me a coffee:
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/markgionus)
+
+---
+
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
