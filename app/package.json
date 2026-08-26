@@ -4,7 +4,11 @@
   "version": "1.0.0",
   "description": "Open-source preset manager for the Arturia MicroFreak (Windows/macOS/Linux)",
   "main": "main.js",
-  "author": "ManageFreak contributors",
+  "author": {
+    "name": "ManageFreak contributors",
+    "email": "marcongiovanni03@gmail.com"
+  },
+  "homepage": "https://github.com/GiovanniBitbyBit/managefreak",
   "license": "GPL-3.0-or-later",
   "scripts": {
     "start": "electron .",
