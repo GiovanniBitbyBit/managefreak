@@ -2401,21 +2401,85 @@ const App = (() => {
         });
         row.addEventListener('dragend', () => row.classList.remove('dragging'));
       }
-      row.addEventListener('dragover', (e) => {
-        if (!e.dataTransfer.types.includes('application/x-managefreak-wt')) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-        row.classList.add('drop-target');
-      });
-      row.addEventListener('dragleave', () => row.classList.remove('drop-target'));
-      row.addEventListener('drop', (e) => {
-        e.preventDefault();
-        row.classList.remove('drop-target');
-        const idStr = e.dataTransfer.getData('application/x-managefreak-wt');
-        if (!idStr) return;
+    });
+    // drag&drop sul contenitore: upload da PC su uno slot, oppure riordino
+    // device (swap al centro della riga, shift sui bordi)
+    const clearWtHighlights = () => {
+      listEl.querySelectorAll('.wt-row').forEach((r) =>
+        r.classList.remove('swap-over', 'drop-before', 'drop-after'));
+    };
+    const resolveWtDrop = (clientY) => {
+      const rows = Array.from(listEl.querySelectorAll('.wt-row'));
+      if (!rows.length) return null;
+      let hit = null;
+      for (const row of rows) {
+        const r = row.getBoundingClientRect();
+        if (clientY >= r.top && clientY <= r.bottom) {
+          const rel = (clientY - r.top) / r.height;
+          let mode;
+          if (rel < 0.3) mode = 'before';
+          else if (rel > 0.7) mode = 'after';
+          else mode = 'onto';
+          hit = { slot: parseInt(row.dataset.slot, 10), mode };
+          break;
+        }
+      }
+      if (!hit) {
+        hit = { slot: parseInt(rows[rows.length - 1].dataset.slot, 10), mode: 'after' };
+        for (const row of rows) {
+          const r = row.getBoundingClientRect();
+          if (clientY < r.top) {
+            hit = { slot: parseInt(row.dataset.slot, 10), mode: 'before' };
+            break;
+          }
+        }
+      }
+      return hit;
+    };
+    const handleWtDrop = async (e, target) => {
+      const idStr = e.dataTransfer.getData('application/x-managefreak-wt');
+      if (idStr) {
         const entry = state.wtLib.find((x) => x.id === idStr);
-        if (entry) uploadWavetableEntryToSlot(entry, slot);
-      });
+        if (entry) uploadWavetableEntryToSlot(entry, target.slot);
+        return;
+      }
+      const block = e.dataTransfer.getData('application/x-managefreak-wt-block');
+      const srcSlot = parseInt(e.dataTransfer.getData('application/x-managefreak-wt-slot'), 10);
+      if (!srcSlot && !block) return;
+      if (!block && srcSlot === target.slot) return;
+      const moved = block
+        ? block.split(',').map(Number)
+        : (state.wtSel.has(srcSlot) && state.wtSel.size > 1 ? Array.from(state.wtSel) : [srcSlot]);
+      if (target.mode === 'onto' && moved.length === 1) {
+        await moveWavetableSelection(moved, target.slot, false, { swap: true });
+      } else {
+        await moveWavetableSelection(moved, target.slot, target.mode === 'after');
+      }
+    };
+    const wtDragTypes = ['application/x-managefreak-wt', 'application/x-managefreak-wt-slot', 'application/x-managefreak-wt-block'];
+    listEl.addEventListener('dragover', (e) => {
+      if (!wtDragTypes.some((t) => e.dataTransfer.types.includes(t))) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      clearWtHighlights();
+      const target = resolveWtDrop(e.clientY);
+      if (!target) return;
+      const row = listEl.querySelector(`.wt-row[data-slot="${target.slot}"]`);
+      if (row) {
+        if (target.mode === 'onto') row.classList.add('swap-over');
+        else if (target.mode === 'before') row.classList.add('drop-before');
+        else row.classList.add('drop-after');
+      }
+    });
+    listEl.addEventListener('dragleave', (e) => {
+      if (!e.relatedTarget || !listEl.contains(e.relatedTarget)) clearWtHighlights();
+    });
+    listEl.addEventListener('drop', async (e) => {
+      if (!wtDragTypes.some((t) => e.dataTransfer.types.includes(t))) return;
+      e.preventDefault();
+      clearWtHighlights();
+      const target = resolveWtDrop(e.clientY);
+      if (target) await handleWtDrop(e, target);
     });
     const pcList = $('wt-pc-list');
     if (pcList && !pcList.dataset.bound) {
@@ -2637,21 +2701,85 @@ const App = (() => {
         });
         row.addEventListener('dragend', () => row.classList.remove('dragging'));
       }
-      row.addEventListener('dragover', (e) => {
-        if (!e.dataTransfer.types.includes('application/x-managefreak-sm')) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-        row.classList.add('drop-target');
-      });
-      row.addEventListener('dragleave', () => row.classList.remove('drop-target'));
-      row.addEventListener('drop', (e) => {
-        e.preventDefault();
-        row.classList.remove('drop-target');
-        const idStr = e.dataTransfer.getData('application/x-managefreak-sm');
-        if (!idStr) return;
+    });
+    // drag&drop sul contenitore: upload da PC su uno slot, oppure riordino
+    // device (swap al centro della riga, shift sui bordi)
+    const clearSmHighlights = () => {
+      list.querySelectorAll('.sm-row').forEach((r) =>
+        r.classList.remove('swap-over', 'drop-before', 'drop-after'));
+    };
+    const resolveSmDrop = (clientY) => {
+      const rows = Array.from(list.querySelectorAll('.sm-row'));
+      if (!rows.length) return null;
+      let hit = null;
+      for (const row of rows) {
+        const r = row.getBoundingClientRect();
+        if (clientY >= r.top && clientY <= r.bottom) {
+          const rel = (clientY - r.top) / r.height;
+          let mode;
+          if (rel < 0.3) mode = 'before';
+          else if (rel > 0.7) mode = 'after';
+          else mode = 'onto';
+          hit = { slot: parseInt(row.dataset.slot, 10), mode };
+          break;
+        }
+      }
+      if (!hit) {
+        hit = { slot: parseInt(rows[rows.length - 1].dataset.slot, 10), mode: 'after' };
+        for (const row of rows) {
+          const r = row.getBoundingClientRect();
+          if (clientY < r.top) {
+            hit = { slot: parseInt(row.dataset.slot, 10), mode: 'before' };
+            break;
+          }
+        }
+      }
+      return hit;
+    };
+    const handleSmDrop = async (e, target) => {
+      const idStr = e.dataTransfer.getData('application/x-managefreak-sm');
+      if (idStr) {
         const entry = state.smLib.find((x) => x.id === idStr);
-        if (entry) uploadSampleEntryToSlot(entry, slot);
-      });
+        if (entry) uploadSampleEntryToSlot(entry, target.slot);
+        return;
+      }
+      const block = e.dataTransfer.getData('application/x-managefreak-sm-block');
+      const srcSlot = parseInt(e.dataTransfer.getData('application/x-managefreak-sm-slot'), 10);
+      if (!srcSlot && !block) return;
+      if (!block && srcSlot === target.slot) return;
+      const moved = block
+        ? block.split(',').map(Number)
+        : (state.smSel.has(srcSlot) && state.smSel.size > 1 ? Array.from(state.smSel) : [srcSlot]);
+      if (target.mode === 'onto' && moved.length === 1) {
+        await moveSampleSelection(moved, target.slot, false, { swap: true });
+      } else {
+        await moveSampleSelection(moved, target.slot, target.mode === 'after');
+      }
+    };
+    const smDragTypes = ['application/x-managefreak-sm', 'application/x-managefreak-sm-slot', 'application/x-managefreak-sm-block'];
+    list.addEventListener('dragover', (e) => {
+      if (!smDragTypes.some((t) => e.dataTransfer.types.includes(t))) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      clearSmHighlights();
+      const target = resolveSmDrop(e.clientY);
+      if (!target) return;
+      const row = list.querySelector(`.sm-row[data-slot="${target.slot}"]`);
+      if (row) {
+        if (target.mode === 'onto') row.classList.add('swap-over');
+        else if (target.mode === 'before') row.classList.add('drop-before');
+        else row.classList.add('drop-after');
+      }
+    });
+    list.addEventListener('dragleave', (e) => {
+      if (!e.relatedTarget || !list.contains(e.relatedTarget)) clearSmHighlights();
+    });
+    list.addEventListener('drop', async (e) => {
+      if (!smDragTypes.some((t) => e.dataTransfer.types.includes(t))) return;
+      e.preventDefault();
+      clearSmHighlights();
+      const target = resolveSmDrop(e.clientY);
+      if (target) await handleSmDrop(e, target);
     });
     const pcList = $('sm-pc-list');
     if (pcList && !pcList.dataset.bound) {
@@ -3492,7 +3620,120 @@ const App = (() => {
     }
   }
 
-  // ------------------------------------------------------------------ librerie PC: wavetable e sample
+  // ---------------------------------------------------------------- riordino device wavetable/sample
+
+  async function moveWavetableSelection(moved, targetSlot, after, { swap = false } = {}) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    if (!state.wavetables) return;
+    const occupied = state.wavetables.map((h, i) => h && !h.empty ? i + 1 : null).filter(Boolean);
+    const validMoved = moved.filter((s) => occupied.includes(s));
+    if (!validMoved.length) return toast('The selected slots do not contain wavetables.', 'err');
+    let writes;
+    if (swap) {
+      if (validMoved.length !== 1 || !occupied.includes(targetSlot)) return toast('Swap requires two occupied slots.', 'err');
+      const a = validMoved[0];
+      const b = targetSlot;
+      writes = [{ from: a, to: b }, { from: b, to: a }];
+    } else {
+      const plan = Shift.planShift(occupied, validMoved, targetSlot, after);
+      writes = plan.writes;
+    }
+    if (!writes.length) return;
+    const movedNames = validMoved.map((s) => (state.wavetables[s - 1] && state.wavetables[s - 1].name) || `slot ${s}`);
+    const targetName = occupied.includes(targetSlot)
+      ? (state.wavetables[targetSlot - 1] && state.wavetables[targetSlot - 1].name) || `slot ${targetSlot}`
+      : `empty slot ${targetSlot}`;
+    const yes = await showModal(
+      swap ? `Swap wavetables?` : `Move ${validMoved.length} wavetable${validMoved.length === 1 ? '' : 's'}?`,
+      swap
+        ? `<p><strong>${esc(movedNames[0])}</strong> (slot ${validMoved[0]}) ⇄ <strong>${esc(targetName)}</strong> (slot ${targetSlot})</p>
+           <p class="muted" style="font-size:12px">One-to-one swap with backup, verification and automatic rollback.</p>`
+        : `<p><strong>${validMoved.length} wavetable${validMoved.length === 1 ? '' : 's'}</strong> will be moved:
+             <strong>${esc(movedNames.join(', '))}</strong></p>
+           <p>Position: <strong>${after ? 'after' : 'before'} "${esc(targetName)}"</strong>.</p>
+           <p class="muted" style="font-size:12px">The other wavetables will be shifted accordingly.
+             All involved wavetables are read as backups and restored on error. This may take a while.</p>`,
+      { okLabel: swap ? 'Swap' : 'Move & shift' }
+    );
+    if (!yes) return;
+    setBusy(true, 'Reading the involved wavetables…');
+    setProgress(0, 'Reordering…');
+    try {
+      await MF.reorderWavetables(writes, validMoved, {
+        onProgress: (frac, label) => setProgress(frac, label),
+      });
+      for (let s = 1; s <= MF.WAVE_SLOTS; s++) {
+        if (state.wavetables) state.wavetables[s - 1] = await MF.readWavetableHeader(s);
+      }
+      state.wtSel.clear();
+      state.wtSelAnchor = null;
+      renderWavetables();
+      toast(`${swap ? 'Swapped' : 'Moved'} ${validMoved.length} wavetable${validMoved.length === 1 ? '' : 's'} ✓`, 'ok');
+    } catch (e) {
+      toast('Wavetable move failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }
+
+  async function moveSampleSelection(moved, targetSlot, after, { swap = false } = {}) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    if (!state.samples) return;
+    const occupied = state.samples.map((h, i) => h && !h.empty ? i + 1 : null).filter(Boolean);
+    const validMoved = moved.filter((s) => occupied.includes(s));
+    if (!validMoved.length) return toast('The selected slots do not contain samples.', 'err');
+    let writes;
+    if (swap) {
+      if (validMoved.length !== 1 || !occupied.includes(targetSlot)) return toast('Swap requires two occupied slots.', 'err');
+      const a = validMoved[0];
+      const b = targetSlot;
+      writes = [{ from: a, to: b }, { from: b, to: a }];
+    } else {
+      const plan = Shift.planShift(occupied, validMoved, targetSlot, after);
+      writes = plan.writes;
+    }
+    if (!writes.length) return;
+    const movedNames = validMoved.map((s) => (state.samples[s - 1] && state.samples[s - 1].name) || `slot ${s}`);
+    const targetName = occupied.includes(targetSlot)
+      ? (state.samples[targetSlot - 1] && state.samples[targetSlot - 1].name) || `slot ${targetSlot}`
+      : `empty slot ${targetSlot}`;
+    const yes = await showModal(
+      swap ? `Swap samples?` : `Move ${validMoved.length} sample${validMoved.length === 1 ? '' : 's'}?`,
+      swap
+        ? `<p><strong>${esc(movedNames[0])}</strong> (slot ${validMoved[0]}) ⇄ <strong>${esc(targetName)}</strong> (slot ${targetSlot})</p>
+           <p class="muted" style="font-size:12px">One-to-one swap: only the directory entries are rewritten,
+             the audio bodies never move. Backup, verification and automatic rollback included.</p>`
+        : `<p><strong>${validMoved.length} sample${validMoved.length === 1 ? '' : 's'}</strong> will be moved:
+             <strong>${esc(movedNames.join(', '))}</strong></p>
+           <p>Position: <strong>${after ? 'after' : 'before'} "${esc(targetName)}"</strong>.</p>
+           <p class="muted" style="font-size:12px">Only the directory entries are rewritten (the audio bodies
+             stay in place), so this is fast even for large samples. Backup, verification and rollback included.</p>`,
+      { okLabel: swap ? 'Swap' : 'Move & shift' }
+    );
+    if (!yes) return;
+    setBusy(true, 'Reading sample entries…');
+    setProgress(0, 'Reordering…');
+    try {
+      await MF.reorderSamples(writes, validMoved, {
+        onProgress: (frac, label) => setProgress(frac, label),
+      });
+      for (let s = 1; s <= MF.SAMPLE_SLOTS; s++) {
+        if (state.samples) state.samples[s - 1] = await MF.readSampleHeader(s);
+      }
+      state.smSel.clear();
+      state.smSelAnchor = null;
+      renderSamples();
+      toast(`${swap ? 'Swapped' : 'Moved'} ${validMoved.length} sample${validMoved.length === 1 ? '' : 's'} ✓`, 'ok');
+    } catch (e) {
+      toast('Sample move failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }
+
+  // ---------------------------------------------------------------- riordino device (fine)
 
   const _libId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 

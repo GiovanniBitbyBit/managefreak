@@ -1080,6 +1080,74 @@ async function test(name, fn) {
     assert.ok(!stub.calls.some((c) => c.op === 0x59 || c.op === 0x5d || c.op === 0x58));
   });
 
+  await test('reorderSamples: swap 1⇄2 riscrive solo le voci di directory', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const mkHeader = (addr, size, checksum, name, slot) => {
+      const h = new Uint8Array(28);
+      h[0] = addr & 0xff; h[1] = (addr >> 8) & 0xff; h[2] = (addr >> 16) & 0xff; h[3] = (addr >> 24) & 0xff;
+      h[4] = size & 0xff; h[5] = (size >> 8) & 0xff;
+      h[8] = checksum & 0xff; h[9] = (checksum >> 8) & 0xff;
+      for (let i = 0; i < name.length; i++) h[10 + i] = name.charCodeAt(i);
+      h[23] = slot - 1;
+      return h;
+    };
+    const hA = mkHeader(0x100, 100, 0x1111, 'AAA', 1);
+    const hB = mkHeader(0x200, 200, 0x2222, 'BBB', 2);
+    const script = [
+      sysex(0, 0x15, []), sysex(0, 0x16, MF.pack7to8(hA)),   // backup slot 1
+      sysex(0, 0x15, []), sysex(0, 0x16, MF.pack7to8(hB)),   // backup slot 2
+      ack(), ack(), ack(),                                     // reset(2, A)
+      ack(), ack(), ack(),                                     // reset(1, B)
+      sysex(0, 0x15, []), sysex(0, 0x16, MF.pack7to8(hA)),   // verifica slot 2
+      sysex(0, 0x15, []), sysex(0, 0x16, MF.pack7to8(hB)),   // verifica slot 1
+    ];
+    stub.queue(...script);
+    const writes = [{ from: 1, to: 2 }, { from: 2, to: 1 }];
+    await MF.reorderSamples(writes, [1]);
+    // il device id (byte 23) di ogni header scritto è lo slot di destinazione
+    const headerWrites = stub.calls.filter((c) => c.op === 0x17 && c.payload.length === 32);
+    assert.strictEqual(headerWrites.length, 2);
+    const decA = MF.unpack8to7(new Uint8Array(headerWrites[0].payload));
+    const decB = MF.unpack8to7(new Uint8Array(headerWrites[1].payload));
+    assert.strictEqual(decA[23], 1); // scritto verso slot 2
+    assert.strictEqual(decB[23], 0); // scritto verso slot 1
+    assert.strictEqual(String.fromCharCode(decA[10], decA[11], decA[12]), 'AAA');
+    assert.strictEqual(String.fromCharCode(decB[10], decB[11], decB[12]), 'BBB');
+    // nessun trasferimento di corpi audio
+    assert.ok(!stub.calls.some((c) => c.op === 0x59 || c.op === 0x58 || c.op === 0x5d));
+  });
+
+  await test('reorderWavetables: swap 1⇄2 muove i corpi', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const bodyA = makePcm(16384, 21);
+    const bodyB = makePcm(16384, 33);
+    const hA = MF.pack7to8(wtHeaderRaw(1, 'AAA'));
+    const hB = MF.pack7to8(wtHeaderRaw(2, 'BBB'));
+    const script = [];
+    // backup: readWavetable(1) = header + 4 parti, readWavetable(2) = idem
+    script.push(sysex(0, 0x15, []), sysex(0, 0x16, hA));
+    for (let p = 0; p < 4; p++) { script.push(sysex(0, 0x15, [])); script.push(...partPackets(bodyA, p * 4096)); }
+    script.push(sysex(0, 0x15, []), sysex(0, 0x16, hB));
+    for (let p = 0; p < 4; p++) { script.push(sysex(0, 0x15, [])); script.push(...partPackets(bodyB, p * 4096)); }
+    // apply: setWavetableEntry(2,'AAA') + 4 parti di bodyA
+    script.push(ack(), ack(), ack(), ack());
+    for (let p = 0; p < 4; p++) { script.push(ack(), ack()); for (let k = 0; k < 147; k++) script.push(ack()); }
+    // apply: setWavetableEntry(1,'BBB') + 4 parti di bodyB
+    script.push(ack(), ack(), ack(), ack());
+    for (let p = 0; p < 4; p++) { script.push(ack(), ack()); for (let k = 0; k < 147; k++) script.push(ack()); }
+    // verifica header: slot 2 → AAA, slot 1 → BBB
+    script.push(sysex(0, 0x15, []), sysex(0, 0x16, hA));
+    script.push(sysex(0, 0x15, []), sysex(0, 0x16, hB));
+    // verifica corpo del blocco spostato (from=1 → to=2): bodyA
+    script.push(sysex(0, 0x15, []), sysex(0, 0x16, hA));
+    for (let p = 0; p < 4; p++) { script.push(sysex(0, 0x15, [])); script.push(...partPackets(bodyA, p * 4096)); }
+    stub.queue(...script);
+    const writes = [{ from: 1, to: 2 }, { from: 2, to: 1 }];
+    await MF.reorderWavetables(writes, [1]);
+  });
+
   // ================================================================== MFP: wavetable/sample
   console.log('Formati wavetable/sample (.mfw/.mfwz/.mfsample/WAV):');
 

@@ -998,6 +998,108 @@ const MF = (() => {
     return check;
   }
 
+  // ------------------------------------------------------------------ riordino (swap/shift)
+
+  async function restoreWavetableEntries(backup) {
+    for (const [from, p] of backup) {
+      await setWavetableEntry(from, p.name);
+      await uploadWavetableParts(from, p.data);
+    }
+  }
+
+  /** Riordina wavetable: backup di tutte le sorgenti, scritture, verifica, rollback. */
+  async function reorderWavetables(writes, movedSlots, { onProgress } = {}) {
+    const report = (f, l) => { if (onProgress) onProgress(f, l); };
+    const backup = new Map();
+    for (let i = 0; i < writes.length; i++) {
+      const w = writes[i];
+      const p = await readWavetable(w.from);
+      if (!p.data) throw new Error(`Wavetable slot ${w.from} has no body`);
+      backup.set(w.from, p);
+      report((i / writes.length) * 0.4, `Backing up slot ${w.from}…`);
+    }
+    try {
+      for (let k = 0; k < writes.length; k++) {
+        const w = writes[k];
+        const p = backup.get(w.from);
+        await setWavetableEntry(w.to, p.name);
+        await uploadWavetableParts(w.to, p.data);
+        report(0.4 + (k / writes.length) * 0.5, `Writing slot ${w.to}…`);
+      }
+    } catch (e) {
+      await restoreWavetableEntries(backup);
+      throw new Error(`Wavetable reorder failed and was restored (${e.message})`);
+    }
+    report(0.95, 'Verifying…');
+    for (const w of writes) {
+      const expected = backup.get(w.from);
+      const h = await readWavetableHeader(w.to);
+      if (h.empty || h.name !== expected.name) {
+        await restoreWavetableEntries(backup);
+        throw new Error(`Wavetable reorder verification failed at slot ${w.to}; restored`);
+      }
+    }
+    const movedSet = new Set(movedSlots);
+    for (const w of writes) {
+      if (!movedSet.has(w.from)) continue;
+      const expected = backup.get(w.from);
+      const rb = await readWavetable(w.to);
+      if (!rb.data || !bytesEqual(rb.data, expected.data)) {
+        await restoreWavetableEntries(backup);
+        throw new Error(`Wavetable reorder body verification failed at slot ${w.to}; restored`);
+      }
+    }
+    report(1, 'Done');
+    return true;
+  }
+
+  async function restoreSampleEntries(backup) {
+    for (const [from, raw] of backup) {
+      const header = Uint8Array.from(raw);
+      header[23] = (from - 1) & 0x7f;
+      await resetSampleHeader(from, header);
+    }
+  }
+
+  /** Riordina sample SOLO tramite voci di directory: i corpi audio non si muovono. */
+  async function reorderSamples(writes, movedSlots, { onProgress } = {}) {
+    const report = (f, l) => { if (onProgress) onProgress(f, l); };
+    const backup = new Map();
+    for (let i = 0; i < writes.length; i++) {
+      const w = writes[i];
+      const h = await readSampleHeader(w.from);
+      if (h.empty) throw new Error(`Sample slot ${w.from} is empty`);
+      backup.set(w.from, Uint8Array.from(h.raw));
+      report((i / writes.length) * 0.4, `Backing up slot ${w.from}…`);
+    }
+    try {
+      for (let k = 0; k < writes.length; k++) {
+        const w = writes[k];
+        const raw = backup.get(w.from);
+        const header = Uint8Array.from(raw);
+        header[23] = (w.to - 1) & 0x7f;
+        await resetSampleHeader(w.to, header);
+        report(0.4 + (k / writes.length) * 0.5, `Writing slot ${w.to}…`);
+      }
+    } catch (e) {
+      await restoreSampleEntries(backup);
+      throw new Error(`Sample reorder failed and was restored (${e.message})`);
+    }
+    report(0.95, 'Verifying…');
+    for (const w of writes) {
+      const raw = backup.get(w.from);
+      const expectedName = asciiName(raw, 10, 23);
+      const expectedSize = le32(raw, 4);
+      const h = await readSampleHeader(w.to);
+      if (h.empty || h.name !== expectedName || h.sizeBytes !== expectedSize) {
+        await restoreSampleEntries(backup);
+        throw new Error(`Sample reorder verification failed at slot ${w.to}; restored`);
+      }
+    }
+    report(1, 'Done');
+    return true;
+  }
+
   // -------------------------------------------------------------------------
   // Lock seriale sulle transazioni MIDI: il MicroFreak ha un unico stream,
   // quindi richieste concorrenti (es. due letture in parallelo) si
@@ -1054,6 +1156,8 @@ const MF = (() => {
     writeSample: locked(writeSample),
     clearSample: locked(clearSample),
     renameSample: locked(renameSample),
+    reorderWavetables: locked(reorderWavetables),
+    reorderSamples: locked(reorderSamples),
   };
 })();
 

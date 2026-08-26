@@ -1046,3 +1046,11 @@ select {
 .detail-side { min-width: 0; }
 .detail-side .detail-render-box { margin-top: 0; }
 .lib-item-row.selected { background: var(--bg2); outline: 1px solid var(--accent2); }
+
+/* evidenziazione riordino device (wavetable/sample) */
+.wt-row.drop-before,
+.sm-row.drop-before { box-shadow: inset 0 2px 0 var(--accent2); }
+.wt-row.drop-after,
+.sm-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent2); }
+.wt-row.swap-over,
+.sm-row.swap-over { outline: 2px solid var(--accent2); outline-offset: -2px; background: var(--bg2); }
