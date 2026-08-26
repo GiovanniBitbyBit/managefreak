@@ -2490,8 +2490,11 @@ const App = (() => {
       return toast('Import failed: ' + (e.message || e), 'err', 6000);
     }
     setBusy(true, `Uploading wavetable to slot ${target}…`);
+    setProgress(0, 'Uploading wavetable…');
     try {
-      await MF.writeWavetable(target, { name: wt.name || 'Wavetable', data: wt.data });
+      await MF.writeWavetable(target, { name: wt.name || 'Wavetable', data: wt.data }, {
+        onProgress: (frac, label) => setProgress(frac, label),
+      });
       delete state.wtData[target];
       if (state.wavetables) state.wavetables[target - 1] = await MF.readWavetableHeader(target);
       renderWavetables();
@@ -2501,6 +2504,7 @@ const App = (() => {
       toast('Wavetable upload failed: ' + (e.message || e), 'err', 6000);
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   }
 
@@ -2733,8 +2737,11 @@ const App = (() => {
       return toast('Import failed: ' + (e.message || e), 'err', 6000);
     }
     setBusy(true, `Uploading sample to slot ${target}…`);
+    setProgress(0, 'Uploading sample…');
     try {
-      await MF.writeSample(target, name, data);
+      await MF.writeSample(target, name, data, {
+        onProgress: (frac, label) => setProgress(frac, label),
+      });
       delete state.smData[target];
       if (state.samples) state.samples[target - 1] = await MF.readSampleHeader(target);
       try {
@@ -2749,6 +2756,7 @@ const App = (() => {
       toast('Sample upload failed: ' + (e.message || e), 'err', 6000);
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   }
 
@@ -3838,8 +3846,11 @@ const App = (() => {
 
   async function uploadWavetableEntryToSlot(entry, slot) {
     setBusy(true, `Uploading wavetable to slot ${slot}…`);
+    setProgress(0, 'Uploading wavetable…');
     try {
-      await MF.writeWavetable(slot, { name: entry.name, data: Mfp.b64ToBytes(entry.dataB64) });
+      await MF.writeWavetable(slot, { name: entry.name, data: Mfp.b64ToBytes(entry.dataB64) }, {
+        onProgress: (frac, label) => setProgress(frac, label),
+      });
       delete state.wtData[slot];
       if (state.wavetables) state.wavetables[slot - 1] = await MF.readWavetableHeader(slot);
       renderWavetables();
@@ -3849,6 +3860,7 @@ const App = (() => {
       toast('Wavetable upload failed: ' + (e.message || e), 'err', 6000);
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   }
 
@@ -3864,8 +3876,11 @@ const App = (() => {
 
   async function uploadSampleEntryToSlot(entry, slot) {
     setBusy(true, `Uploading sample to slot ${slot}…`);
+    setProgress(0, 'Uploading sample…');
     try {
-      await MF.writeSample(slot, entry.name, Mfp.b64ToBytes(entry.dataB64));
+      await MF.writeSample(slot, entry.name, Mfp.b64ToBytes(entry.dataB64), {
+        onProgress: (frac, label) => setProgress(frac, label),
+      });
       delete state.smData[slot];
       if (state.samples) state.samples[slot - 1] = await MF.readSampleHeader(slot);
       try {
@@ -3880,6 +3895,7 @@ const App = (() => {
       toast('Sample upload failed: ' + (e.message || e), 'err', 6000);
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   }
 

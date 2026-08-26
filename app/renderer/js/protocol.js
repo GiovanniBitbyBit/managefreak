@@ -568,7 +568,7 @@ const MF = (() => {
     await sleep(5);
   }
 
-  async function uploadWavetableParts(slot, pcm16le) {
+  async function uploadWavetableParts(slot, pcm16le, { onPart } = {}) {
     if (!pcm16le || pcm16le.length !== WAVE_PCM_BYTES) {
       throw new Error(`Wavetable must be ${WAVE_PCM_BYTES} bytes`);
     }
@@ -595,6 +595,7 @@ const MF = (() => {
         expectReply(res, 0x18, 0, `Wavetable data ${part}/${packet}`);
         await sleep(5);
       }
+      if (onPart) onPart(part + 1, WAVE_PARTS);
     }
   }
 
@@ -653,18 +654,24 @@ const MF = (() => {
   }
 
   /** Upload guardato con backup + verifica readback + rollback automatico. */
-  async function writeWavetable(slot, { name, data }) {
+  async function writeWavetable(slot, { name, data }, { onProgress } = {}) {
+    const report = (f, l) => { if (onProgress) onProgress(f, l); };
+    report(0.02, 'Reading current slot…');
     const beforeHeader = await readWavetableHeader(slot);
     const before = beforeHeader.empty ? null : await readWavetable(slot);
+    report(0.08, 'Uploading wavetable…');
     try {
       await setWavetableEntry(slot, name);
-      await uploadWavetableParts(slot, data);
+      await uploadWavetableParts(slot, data, {
+        onPart: (i, t) => report(0.1 + (i / t) * 0.8, `Wavetable part ${i}/${t}`),
+      });
     } catch (e) {
       if (!(await restoreWavetable(slot, before))) {
         throw new Error(`Wavetable write failed and restore failed (${e.message})`);
       }
       throw e;
     }
+    report(0.92, 'Verifying…');
     const readback = await readWavetable(slot);
     if (!readback.data || !bytesEqual(readback.data, data)) {
       if (!(await restoreWavetable(slot, before))) {
@@ -672,6 +679,7 @@ const MF = (() => {
       }
       throw new Error('Wavetable readback mismatch; original restored');
     }
+    report(1, 'Done');
     return true;
   }
 
@@ -830,7 +838,7 @@ const MF = (() => {
     }
   }
 
-  async function uploadSampleParts(slot, audio) {
+  async function uploadSampleParts(slot, audio, { onPart } = {}) {
     const id0 = slot - 1;
     const partCount = Math.ceil(audio.length / SAMPLE_PART_BYTES);
     for (let part = 0; part < partCount; part++) {
@@ -856,10 +864,11 @@ const MF = (() => {
         expectReply(res, 0x18, 0, `Sample data ${part}/${packet}`);
         await sleep(5);
       }
+      if (onPart) onPart(part + 1, partCount);
     }
   }
 
-  async function uploadSample(slot, name, audio) {
+  async function uploadSample(slot, name, audio, { onPart } = {}) {
     if (!audio || audio.length < 2 || audio.length > SAMPLE_MAX_BYTES) {
       throw new Error(`Sample PCM must be 2..${SAMPLE_MAX_BYTES} bytes`);
     }
@@ -891,7 +900,7 @@ const MF = (() => {
     await resetSampleHeader(slot, header);
 
     // 3. trasferimento dei blocchi
-    await uploadSampleParts(slot, audio);
+    await uploadSampleParts(slot, audio, { onPart });
 
     // 4. passaggio di stream post-upload (flusso ufficiale MCC)
     res = await request(0x5b, [id0, 0, 1]);
@@ -916,22 +925,29 @@ const MF = (() => {
   }
 
   /** Upload guardato con backup, verifica readback e rollback automatico. */
-  async function writeSample(slot, name, audio) {
+  async function writeSample(slot, name, audio, { onProgress } = {}) {
+    const report = (f, l) => { if (onProgress) onProgress(f, l); };
+    report(0.02, 'Reading current slot…');
     const beforeHeader = await readSampleHeader(slot);
     const before = beforeHeader.empty ? null : await readSample(slot);
+    report(0.07, 'Checking sample memory…');
     const stats = await readSampleStats();
     const padded = Math.ceil(audio.length / SAMPLE_PART_BYTES) * SAMPLE_PART_BYTES;
     if (padded > stats.freeBytes) {
       throw new Error('Not enough free sample memory for this upload');
     }
+    report(0.1, 'Uploading sample…');
     try {
-      await uploadSample(slot, name, audio);
+      await uploadSample(slot, name, audio, {
+        onPart: (i, t) => report(0.1 + (i / t) * 0.8, `Sample block ${i}/${t}`),
+      });
     } catch (e) {
       if (!(await restoreSample(slot, before))) {
         throw new Error(`Sample write failed and restore failed (${e.message})`);
       }
       throw e;
     }
+    report(0.92, 'Verifying…');
     const readback = await readSample(slot);
     if (!readback.data || !bytesEqual(readback.data, audio)) {
       if (!(await restoreSample(slot, before))) {
@@ -939,6 +955,7 @@ const MF = (() => {
       }
       throw new Error('Sample readback mismatch; original restored');
     }
+    report(1, 'Done');
     return true;
   }
 
