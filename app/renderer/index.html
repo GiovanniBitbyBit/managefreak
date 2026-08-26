@@ -123,6 +123,16 @@
             <div id="wt-list" class="wt-list"></div>
           </div>
         </div>
+        <div id="wt-render" class="wt-render hidden">
+          <div class="wt-render-head">
+            <span id="wt-render-title" class="muted"></span>
+            <label class="cycle-slider">Cycle
+              <input id="wt-cycle" type="range" min="1" max="32" value="1" />
+              <span id="wt-cycle-val">1</span>/32
+            </label>
+          </div>
+          <canvas id="wt-canvas" width="720" height="240"></canvas>
+        </div>
       </div>
 
       <div id="samples-view" class="tab-view hidden">

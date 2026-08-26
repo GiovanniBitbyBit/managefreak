@@ -969,3 +969,31 @@ select {
 .sm-row.dragging { opacity: .5; }
 .wt-row.drop-target,
 .sm-row.drop-target { outline: 2px dashed var(--accent2); outline-offset: -2px; }
+
+/* ---------------------------------------------------------------- render wavetable */
+.wt-render {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 10px 12px;
+}
+.wt-render-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.wt-render-head .muted { flex: 1; }
+.cycle-slider { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.cycle-slider input[type="range"] { width: 140px; accent-color: var(--accent2); }
+#wt-canvas {
+  width: 100%;
+  height: auto;
+  background: #12121a;
+  border-radius: 6px;
+  display: block;
+}
+.wt-row.selected { background: var(--bg2); outline: 1px solid var(--accent2); }
+.pc-item.selected { outline: 1px solid var(--accent2); }
