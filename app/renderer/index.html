@@ -213,16 +213,19 @@
     <div id="detail-pane">
       <div id="detail-empty" class="detail-empty">Select an item for details</div>
       <div id="detail" class="hidden">
-        <h2 id="detail-name"></h2>
-        <div id="detail-meta" class="detail-meta"></div>
-        <div id="detail-tags" class="detail-tags"></div>
-        <input id="detail-add-tag" type="text" placeholder="Add tag…" class="hidden" />
-        <div id="detail-notes-box" class="hidden">
-          <textarea id="detail-notes" placeholder="Personal notes…" rows="3"></textarea>
+        <div class="detail-main">
+          <h2 id="detail-name"></h2>
+          <div id="detail-meta" class="detail-meta"></div>
+          <div id="detail-tags" class="detail-tags"></div>
+          <input id="detail-add-tag" type="text" placeholder="Add tag…" class="hidden" />
+          <div id="detail-notes-box" class="hidden">
+            <textarea id="detail-notes" placeholder="Personal notes…" rows="3"></textarea>
+          </div>
+          <div id="detail-actions" class="detail-actions"></div>
+          <h3 id="detail-params-title">Parameters</h3>
+          <div id="detail-params" class="detail-params"></div>
         </div>
-        <div id="detail-actions" class="detail-actions"></div>
-        <h3 id="detail-params-title">Parameters</h3>
-        <div id="detail-params" class="detail-params"></div>
+        <div id="detail-side" class="detail-side hidden"></div>
       </div>
     </div>
   </div>

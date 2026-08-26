@@ -1030,3 +1030,14 @@ select {
 }
 .cycle-slider-small input[type="range"] { width: 110px; accent-color: var(--accent2); }
 .detail-extra { margin-top: 8px; }
+
+/* dettagli a due colonne: informazioni a sinistra, preview a destra */
+#detail.side-open {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.detail-main { min-width: 0; }
+.detail-side { min-width: 0; }
+.detail-side .detail-render-box { margin-top: 0; }

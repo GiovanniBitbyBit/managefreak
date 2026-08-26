@@ -1729,12 +1729,24 @@ const App = (() => {
     el.detail.classList.add('hidden');
   }
 
-  function renderDetail({ name, metaRows, tags, tagInput, notes, actions, params, onRemoveTag, extraHtml, onRename, hideParams = false }) {
+  function renderDetail({ name, metaRows, tags, tagInput, notes, actions, params, onRemoveTag, extraHtml, onRename, hideParams = false, sideHtml = null }) {
     el.detailEmpty.classList.add('hidden');
     el.detail.classList.remove('hidden');
     const paramsTitle = document.getElementById('detail-params-title');
     if (paramsTitle) paramsTitle.classList.toggle('hidden', hideParams);
     el.detailParams.classList.toggle('hidden', hideParams);
+    // colonna destra (preview wavetable/sample)
+    const side = document.getElementById('detail-side');
+    if (side) {
+      if (sideHtml) {
+        side.innerHTML = sideHtml;
+        side.classList.remove('hidden');
+        el.detail.classList.add('side-open');
+      } else {
+        side.classList.add('hidden');
+        el.detail.classList.remove('side-open');
+      }
+    }
     el.detailName.innerHTML = '';
     el.detailName.appendChild(document.createTextNode(name));
     if (onRename) {
@@ -2869,15 +2881,15 @@ const App = (() => {
     const range = Math.max(1, max - min);
     const cycles = 32;
     const samples = 256;
-    const horizonY = H * 0.52;
+    const horizonY = H * 0.5;
     const hc = (highlightCycle === undefined || highlightCycle === null) ? 0 : highlightCycle % cycles;
     // ribbon prospettico: cicli dietro (piccoli, in alto) → davanti (grandi, in basso)
     for (let c = 0; c < cycles; c++) {
       const t = c / (cycles - 1);
       const depth = 0.5 + 0.5 * t;
-      const amp = (H * 0.17) * depth;
-      const yBase = horizonY + (c - (cycles - 1) / 2) * (H * 0.013) * depth;
-      const xPad = (W * 0.05) * (1 - depth);
+      const amp = (H * 0.22) * depth;
+      const yBase = horizonY + (c - (cycles - 1) / 2) * (H * 0.02) * depth;
+      const xPad = (W * 0.04) * (1 - depth);
       ctx.beginPath();
       for (let j = 0; j < samples; j++) {
         const idx = (c * samples + j) * 2;
@@ -2953,7 +2965,7 @@ const App = (() => {
       actions,
       params: [],
       hideParams: true,
-      extraHtml: `<div class="detail-render-box">
+      sideHtml: `<div class="detail-render-box">
         <div class="render-head">
           <span>Wavetable preview</span>
           <label class="cycle-slider-small">Cycle
@@ -2961,7 +2973,7 @@ const App = (() => {
             <span id="wt-detail-cycle-val">1</span>/32
           </label>
         </div>
-        <canvas id="wt-detail-canvas" width="420" height="110"></canvas>
+        <canvas id="wt-detail-canvas" width="460" height="180"></canvas>
       </div>`,
       onRename: (newName) => {
         if (slot) renameWavetableDetail(slot, newName);
@@ -3008,9 +3020,9 @@ const App = (() => {
       actions,
       params: [],
       hideParams: true,
-      extraHtml: `<div class="detail-render-box">
+      sideHtml: `<div class="detail-render-box">
         <div class="render-head"><span>Sample preview</span></div>
-        <canvas id="sm-detail-wave" width="420" height="110"></canvas>
+        <canvas id="sm-detail-wave" width="460" height="180"></canvas>
       </div>`,
       onRename: (newName) => {
         if (slot) renameSampleDetail(slot, newName);
