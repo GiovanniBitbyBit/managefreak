@@ -2395,7 +2395,7 @@ const App = (() => {
         row.classList.remove('drop-target');
         const idStr = e.dataTransfer.getData('application/x-managefreak-wt');
         if (!idStr) return;
-        const entry = state.wtLib.find((x) => x.id === parseInt(idStr, 10));
+        const entry = state.wtLib.find((x) => x.id === idStr);
         if (entry) uploadWavetableEntryToSlot(entry, slot);
       });
     });
@@ -2618,7 +2618,7 @@ const App = (() => {
         row.classList.remove('drop-target');
         const idStr = e.dataTransfer.getData('application/x-managefreak-sm');
         if (!idStr) return;
-        const entry = state.smLib.find((x) => x.id === parseInt(idStr, 10));
+        const entry = state.smLib.find((x) => x.id === idStr);
         if (entry) uploadSampleEntryToSlot(entry, slot);
       });
     });
@@ -3074,10 +3074,10 @@ const App = (() => {
     const entry = state.wtLib.find((e) => e.id === id);
     if (!entry) return;
     document.querySelectorAll('#wt-pc-list .pc-item').forEach((item) => {
-      item.classList.toggle('selected', parseInt(item.dataset.id, 10) === id);
+      item.classList.toggle('selected', String(item.dataset.id) === String(id));
     });
     document.querySelectorAll('#wt-lib-list .lib-item-row').forEach((row) => {
-      row.classList.toggle('selected', parseInt(row.dataset.wtLib, 10) === id);
+      row.classList.toggle('selected', String(row.dataset.wtLib) === String(id));
     });
     showWtDetail({ name: entry.name, data: Mfp.b64ToBytes(entry.dataB64), libId: id, source: entry.source || 'PC library' });
   }
@@ -3139,10 +3139,10 @@ const App = (() => {
     const entry = state.smLib.find((e) => e.id === id);
     if (!entry) return;
     document.querySelectorAll('#sm-pc-list .pc-item').forEach((item) => {
-      item.classList.toggle('selected', parseInt(item.dataset.id, 10) === id);
+      item.classList.toggle('selected', String(item.dataset.id) === String(id));
     });
     document.querySelectorAll('#sm-lib-list .lib-item-row').forEach((row) => {
-      row.classList.toggle('selected', parseInt(row.dataset.smLib, 10) === id);
+      row.classList.toggle('selected', String(row.dataset.smLib) === String(id));
     });
     showSmDetail({
       name: entry.name,
@@ -3270,11 +3270,11 @@ const App = (() => {
     list.querySelectorAll('[data-del]').forEach((x) => {
       x.addEventListener('click', (e) => {
         e.stopPropagation();
-        deleteWavetableFromLib(parseInt(x.dataset.del, 10));
+        deleteWavetableFromLib(x.dataset.del);
       });
     });
     list.querySelectorAll('.lib-item-row').forEach((row) => {
-      row.addEventListener('click', () => renderWavetableFromLib(parseInt(row.dataset.wtLib, 10)));
+      row.addEventListener('click', () => renderWavetableFromLib(row.dataset.wtLib));
     });
   }
 
@@ -3291,11 +3291,11 @@ const App = (() => {
     list.querySelectorAll('[data-del]').forEach((x) => {
       x.addEventListener('click', (e) => {
         e.stopPropagation();
-        deleteSampleFromLib(parseInt(x.dataset.del, 10));
+        deleteSampleFromLib(x.dataset.del);
       });
     });
     list.querySelectorAll('.lib-item-row').forEach((row) => {
-      row.addEventListener('click', () => renderSampleFromLib(parseInt(row.dataset.smLib, 10)));
+      row.addEventListener('click', () => renderSampleFromLib(row.dataset.smLib));
     });
   }
 
@@ -3319,7 +3319,7 @@ const App = (() => {
       : `<div class="pc-empty">The PC library is empty. Import a WAV, .mfw or .mfwz,
          or drag a device slot here.</div>`;
     list.querySelectorAll('.pc-item').forEach((item) => {
-      const id = parseInt(item.dataset.id, 10);
+      const id = item.dataset.id;
       item.addEventListener('click', (e) => {
         if (e.target.closest('button')) return;
         renderWavetableFromLib(id);
@@ -3363,7 +3363,7 @@ const App = (() => {
       : `<div class="pc-empty">The PC library is empty. Import a WAV or .mfsample,
          or drag a device slot here.</div>`;
     list.querySelectorAll('.pc-item').forEach((item) => {
-      const id = parseInt(item.dataset.id, 10);
+      const id = item.dataset.id;
       item.addEventListener('click', (e) => {
         if (e.target.closest('button')) return;
         renderSampleFromLib(id);
