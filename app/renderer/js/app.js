@@ -2302,27 +2302,28 @@ const App = (() => {
   }
 
   function renderWavetables() {
-    const grid = $('wt-grid');
-    if (!grid) return;
+    const listEl = $('wt-list');
+    if (!listEl) return;
     const list = state.wavetables || [];
     const occ = list.filter((h) => h && !h.empty).length;
     const count = $('wt-count');
     if (count) count.textContent = `(${occ}/16 used)`;
-    grid.innerHTML = list.map((h, i) => {
+    listEl.innerHTML = list.map((h, i) => {
       const slot = i + 1;
       const empty = !h || h.empty;
-      return `<div class="wt-card ${empty ? 'empty' : ''}" data-slot="${slot}">
-        <span class="wt-num">Slot ${slot}</span>
+      return `<div class="wt-row ${empty ? 'empty' : ''}" data-slot="${slot}">
+        <span class="wt-num">${slot}</span>
         <span class="wt-name">${empty ? '(empty)' : esc(h.name)}</span>
-        <div class="wt-actions">
+        <span class="wt-meta">${empty ? '' : '16 KB'}</span>
+        <span class="wt-actions">
           ${empty ? '' : `<button class="btn small" data-wt="dl" title="Download .mfw">⭳</button>
           <button class="btn small" data-wt="clear" title="Clear slot">✕</button>`}
           <button class="btn small" data-wt="up" title="Upload WAV / .mfw / .mfwz">➡</button>
-        </div>
+        </span>
       </div>`;
     }).join('');
-    grid.querySelectorAll('[data-wt]').forEach((btn) => {
-      const slot = parseInt(btn.closest('.wt-card').dataset.slot, 10);
+    listEl.querySelectorAll('[data-wt]').forEach((btn) => {
+      const slot = parseInt(btn.closest('.wt-row').dataset.slot, 10);
       btn.addEventListener('click', () => {
         const act = btn.dataset.wt;
         if (act === 'dl') readWavetableToPC(slot);
@@ -2331,29 +2332,29 @@ const App = (() => {
       });
     });
     // drag&drop: PC → dispositivo (upload) e dispositivo → PC (archivia)
-    grid.querySelectorAll('.wt-card').forEach((card) => {
-      const slot = parseInt(card.dataset.slot, 10);
+    listEl.querySelectorAll('.wt-row').forEach((row) => {
+      const slot = parseInt(row.dataset.slot, 10);
       const h = list[slot - 1];
       if (h && !h.empty) {
-        card.draggable = true;
-        card.addEventListener('dragstart', (e) => {
+        row.draggable = true;
+        row.addEventListener('dragstart', (e) => {
           e.dataTransfer.setData('application/x-managefreak-wt-slot', String(slot));
           e.dataTransfer.setData('text/plain', String(slot));
           e.dataTransfer.effectAllowed = 'copyMove';
-          card.classList.add('dragging');
+          row.classList.add('dragging');
         });
-        card.addEventListener('dragend', () => card.classList.remove('dragging'));
+        row.addEventListener('dragend', () => row.classList.remove('dragging'));
       }
-      card.addEventListener('dragover', (e) => {
+      row.addEventListener('dragover', (e) => {
         if (!e.dataTransfer.types.includes('application/x-managefreak-wt')) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
-        card.classList.add('drop-target');
+        row.classList.add('drop-target');
       });
-      card.addEventListener('dragleave', () => card.classList.remove('drop-target'));
-      card.addEventListener('drop', (e) => {
+      row.addEventListener('dragleave', () => row.classList.remove('drop-target'));
+      row.addEventListener('drop', (e) => {
         e.preventDefault();
-        card.classList.remove('drop-target');
+        row.classList.remove('drop-target');
         const idStr = e.dataTransfer.getData('application/x-managefreak-wt');
         if (!idStr) return;
         const entry = state.wtLib.find((x) => x.id === parseInt(idStr, 10));

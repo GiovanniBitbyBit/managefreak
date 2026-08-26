@@ -946,3 +946,26 @@ select {
 @media (max-width: 1200px) {
   .pane-split { grid-template-columns: 1fr; }
 }
+
+/* wavetable come lista verticale (speculare ai sample) */
+.wt-list { display: flex; flex-direction: column; gap: 3px; }
+.wt-row {
+  display: grid;
+  grid-template-columns: 44px 1fr 90px auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 13px;
+}
+.wt-row:hover { background: var(--bg2); }
+.wt-row.empty { color: var(--muted); }
+.wt-row .wt-num { color: var(--muted); font-variant-numeric: tabular-nums; }
+.wt-row .wt-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wt-row .wt-meta { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+.wt-row .wt-actions { display: flex; gap: 4px; justify-content: flex-end; }
+.wt-row.dragging,
+.sm-row.dragging { opacity: .5; }
+.wt-row.drop-target,
+.sm-row.drop-target { outline: 2px dashed var(--accent2); outline-offset: -2px; }
