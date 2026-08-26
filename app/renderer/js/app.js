@@ -3076,6 +3076,9 @@ const App = (() => {
     document.querySelectorAll('#wt-pc-list .pc-item').forEach((item) => {
       item.classList.toggle('selected', parseInt(item.dataset.id, 10) === id);
     });
+    document.querySelectorAll('#wt-lib-list .lib-item-row').forEach((row) => {
+      row.classList.toggle('selected', parseInt(row.dataset.wtLib, 10) === id);
+    });
     showWtDetail({ name: entry.name, data: Mfp.b64ToBytes(entry.dataB64), libId: id, source: entry.source || 'PC library' });
   }
 
@@ -3137,6 +3140,9 @@ const App = (() => {
     if (!entry) return;
     document.querySelectorAll('#sm-pc-list .pc-item').forEach((item) => {
       item.classList.toggle('selected', parseInt(item.dataset.id, 10) === id);
+    });
+    document.querySelectorAll('#sm-lib-list .lib-item-row').forEach((row) => {
+      row.classList.toggle('selected', parseInt(row.dataset.smLib, 10) === id);
     });
     showSmDetail({
       name: entry.name,
@@ -3262,7 +3268,13 @@ const App = (() => {
         </div>`).join('')
       : '<div class="hint" style="padding:6px">No wavetables on this PC yet.</div>';
     list.querySelectorAll('[data-del]').forEach((x) => {
-      x.addEventListener('click', () => deleteWavetableFromLib(parseInt(x.dataset.del, 10)));
+      x.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteWavetableFromLib(parseInt(x.dataset.del, 10));
+      });
+    });
+    list.querySelectorAll('.lib-item-row').forEach((row) => {
+      row.addEventListener('click', () => renderWavetableFromLib(parseInt(row.dataset.wtLib, 10)));
     });
   }
 
@@ -3277,7 +3289,13 @@ const App = (() => {
         </div>`).join('')
       : '<div class="hint" style="padding:6px">No samples on this PC yet.</div>';
     list.querySelectorAll('[data-del]').forEach((x) => {
-      x.addEventListener('click', () => deleteSampleFromLib(parseInt(x.dataset.del, 10)));
+      x.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteSampleFromLib(parseInt(x.dataset.del, 10));
+      });
+    });
+    list.querySelectorAll('.lib-item-row').forEach((row) => {
+      row.addEventListener('click', () => renderSampleFromLib(parseInt(row.dataset.smLib, 10)));
     });
   }
 

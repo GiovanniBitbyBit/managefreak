@@ -1045,3 +1045,4 @@ select {
 .detail-main { min-width: 0; }
 .detail-side { min-width: 0; }
 .detail-side .detail-render-box { margin-top: 0; }
+.lib-item-row.selected { background: var(--bg2); outline: 1px solid var(--accent2); }
