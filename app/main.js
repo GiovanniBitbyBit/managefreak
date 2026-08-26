@@ -37,6 +37,40 @@ function createWindow() {
     mainWindow = null;
   });
 
+  if (process.argv.includes('--screenshots')) {
+    // Cattura i 4 tab in screenshot/presets.png ecc. (strumento per le release).
+    // Attese lunghe: l'utente preme Connetti e seleziona qualcosa in ogni schermata.
+    mainWindow.webContents.on('did-finish-load', async () => {
+      await new Promise((r) => setTimeout(r, 25000)); // connetti + sincronizzazione
+      const outDir = path.join(__dirname, '..', 'screenshots');
+      fs.mkdirSync(outDir, { recursive: true });
+      try {
+        // presets (tab iniziale): l'utente seleziona un preset in libreria
+        let img = await mainWindow.webContents.capturePage();
+        fs.writeFileSync(path.join(outDir, 'presets.png'), img.toPNG());
+        // wavetables: l'utente seleziona uno slot wavetable
+        await mainWindow.webContents.executeJavaScript(`document.querySelector('.tab-btn[data-tab="wavetables"]').click()`);
+        await new Promise((r) => setTimeout(r, 25000));
+        img = await mainWindow.webContents.capturePage();
+        fs.writeFileSync(path.join(outDir, 'wavetables.png'), img.toPNG());
+        // samples: l'utente seleziona uno slot sample
+        await mainWindow.webContents.executeJavaScript(`document.querySelector('.tab-btn[data-tab="samples"]').click()`);
+        await new Promise((r) => setTimeout(r, 25000));
+        img = await mainWindow.webContents.capturePage();
+        fs.writeFileSync(path.join(outDir, 'samples.png'), img.toPNG());
+        // device: le impostazioni si caricano da sole
+        await mainWindow.webContents.executeJavaScript(`document.querySelector('.tab-btn[data-tab="device"]').click()`);
+        await new Promise((r) => setTimeout(r, 15000));
+        img = await mainWindow.webContents.capturePage();
+        fs.writeFileSync(path.join(outDir, 'device.png'), img.toPNG());
+        console.log('SCREENSHOTS_OK');
+      } catch (e) {
+        console.log('SCREENSHOTS_FAIL ' + String(e));
+      }
+      app.exit(0);
+    });
+  }
+
   if (process.argv.includes('--smoke')) {
     const errors = [];
     mainWindow.webContents.on('console-message', (_e, level, message) => {
