@@ -697,6 +697,20 @@ const MF = (() => {
     return true;
   }
 
+  /** Rinomina una wavetable sul dispositivo (solo header; il corpo resta). */
+  async function renameWavetable(slot, newName) {
+    const old = await readWavetableHeader(slot);
+    if (old.empty) throw new Error(`Wavetable slot ${slot} is empty`);
+    const name = (newName || 'Wavetable').slice(0, 15);
+    await setWavetableEntry(slot, name);
+    const check = await readWavetableHeader(slot);
+    if (check.empty || check.name !== name) {
+      await setWavetableEntry(slot, old.name);
+      throw new Error('Wavetable rename verification failed; name restored');
+    }
+    return check;
+  }
+
   // ------------------------------------------------------------------ samples
 
   function sampleChecksum(audio) {
@@ -949,6 +963,24 @@ const MF = (() => {
     return true;
   }
 
+  /** Rinomina un sample sul dispositivo (solo header; corpo e indirizzo restano). */
+  async function renameSample(slot, newName) {
+    const old = await readSampleHeader(slot);
+    if (old.empty) throw new Error(`Sample slot ${slot} is empty`);
+    const name = (newName || 'Sample').slice(0, 12);
+    // copia l'header originale (indirizzo/dimensione/checksum restano) e cambia il nome
+    const header = Uint8Array.from(old.raw);
+    for (let i = 10; i < 23; i++) header[i] = 0;
+    for (let i = 0; i < name.length; i++) header[10 + i] = name.charCodeAt(i) & 0x7f;
+    await resetSampleHeader(slot, header);
+    const check = await readSampleHeader(slot);
+    if (check.empty || check.name !== name) {
+      await resetSampleHeader(slot, old.raw);
+      throw new Error('Sample rename verification failed; name restored');
+    }
+    return check;
+  }
+
   // -------------------------------------------------------------------------
   // Lock seriale sulle transazioni MIDI: il MicroFreak ha un unico stream,
   // quindi richieste concorrenti (es. due letture in parallelo) si
@@ -998,11 +1030,13 @@ const MF = (() => {
     readWavetable: locked(readWavetable),
     writeWavetable: locked(writeWavetable),
     clearWavetable: locked(clearWavetable),
+    renameWavetable: locked(renameWavetable),
     readSampleHeader: locked(readSampleHeader),
     readSample: locked(readSample),
     readSampleStats: locked(readSampleStats),
     writeSample: locked(writeSample),
     clearSample: locked(clearSample),
+    renameSample: locked(renameSample),
   };
 })();
 

@@ -39,6 +39,10 @@ const App = (() => {
     smLastRender: null,    // {slot, libId} ultimo sample mostrato nel dettaglio
     wtReadToken: 0,        // token anti-race per le letture wavetable
     sampleReadToken: 0,    // token anti-race per le letture sample
+    wtSel: new Set(),      // multi-selezione sugli slot wavetable del dispositivo
+    wtSelAnchor: null,
+    smSel: new Set(),      // multi-selezione sugli slot sample del dispositivo
+    smSelAnchor: null,
     busy: false,
     cancelRequested: false,
     dragEntryId: null,
@@ -1766,7 +1770,10 @@ const App = (() => {
         el.detailName.appendChild(input);
         input.focus();
         input.select();
+        let done = false;
         const finish = (save) => {
+          if (done) return; // evita il doppio invio (Enter + blur dopo il re-render)
+          done = true;
           if (save && input.value.trim() && input.value.trim() !== name) {
             onRename(input.value.trim());
           } else {
@@ -2315,6 +2322,14 @@ const App = (() => {
       else if (ids.length > 1) showMultiDetail(ids);
       else showDetailEmpty();
     }
+    if (tab !== 'wavetables') {
+      state.wtSel.clear();
+      state.wtSelAnchor = null;
+    }
+    if (tab !== 'samples') {
+      state.smSel.clear();
+      state.smSelAnchor = null;
+    }
   }
 
   // ---------------------------------------------------------------- wavetables
@@ -2370,12 +2385,15 @@ const App = (() => {
       const slot = parseInt(row.dataset.slot, 10);
       row.addEventListener('click', (e) => {
         if (e.target.closest('button')) return;
-        selectWavetable(slot);
+        handleWtSelect(e, slot);
       });
       const h = list[slot - 1];
       if (h && !h.empty) {
         row.draggable = true;
         row.addEventListener('dragstart', (e) => {
+          if (state.wtSel.has(slot) && state.wtSel.size > 1) {
+            e.dataTransfer.setData('application/x-managefreak-wt-block', Array.from(state.wtSel).sort((a, b) => a - b).join(','));
+          }
           e.dataTransfer.setData('application/x-managefreak-wt-slot', String(slot));
           e.dataTransfer.setData('text/plain', String(slot));
           e.dataTransfer.effectAllowed = 'copyMove';
@@ -2403,7 +2421,8 @@ const App = (() => {
     if (pcList && !pcList.dataset.bound) {
       pcList.dataset.bound = '1';
       pcList.addEventListener('dragover', (e) => {
-        if (e.dataTransfer.types.includes('application/x-managefreak-wt-slot')) {
+        const types = e.dataTransfer.types;
+        if (types.includes('application/x-managefreak-wt-slot') || types.includes('application/x-managefreak-wt-block')) {
           e.preventDefault();
           e.dataTransfer.dropEffect = 'copy';
           pcList.classList.add('drop-target');
@@ -2413,6 +2432,11 @@ const App = (() => {
       pcList.addEventListener('drop', (e) => {
         e.preventDefault();
         pcList.classList.remove('drop-target');
+        const block = e.dataTransfer.getData('application/x-managefreak-wt-block');
+        if (block) {
+          importWtSelectionToPc();
+          return;
+        }
         const slotStr = e.dataTransfer.getData('application/x-managefreak-wt-slot');
         if (slotStr) readWavetableSlotToPc(parseInt(slotStr, 10));
       });
@@ -2593,12 +2617,15 @@ const App = (() => {
       const slot = parseInt(row.dataset.slot, 10);
       row.addEventListener('click', (e) => {
         if (e.target.closest('button')) return;
-        selectSample(slot);
+        handleSmSelect(e, slot);
       });
       const h = items[slot - 1];
       if (h && !h.empty) {
         row.draggable = true;
         row.addEventListener('dragstart', (e) => {
+          if (state.smSel.has(slot) && state.smSel.size > 1) {
+            e.dataTransfer.setData('application/x-managefreak-sm-block', Array.from(state.smSel).sort((a, b) => a - b).join(','));
+          }
           e.dataTransfer.setData('application/x-managefreak-sm-slot', String(slot));
           e.dataTransfer.setData('text/plain', String(slot));
           e.dataTransfer.effectAllowed = 'copyMove';
@@ -2626,7 +2653,8 @@ const App = (() => {
     if (pcList && !pcList.dataset.bound) {
       pcList.dataset.bound = '1';
       pcList.addEventListener('dragover', (e) => {
-        if (e.dataTransfer.types.includes('application/x-managefreak-sm-slot')) {
+        const types = e.dataTransfer.types;
+        if (types.includes('application/x-managefreak-sm-slot') || types.includes('application/x-managefreak-sm-block')) {
           e.preventDefault();
           e.dataTransfer.dropEffect = 'copy';
           pcList.classList.add('drop-target');
@@ -2636,6 +2664,11 @@ const App = (() => {
       pcList.addEventListener('drop', (e) => {
         e.preventDefault();
         pcList.classList.remove('drop-target');
+        const block = e.dataTransfer.getData('application/x-managefreak-sm-block');
+        if (block) {
+          importSmSelectionToPc();
+          return;
+        }
         const slotStr = e.dataTransfer.getData('application/x-managefreak-sm-slot');
         if (slotStr) readSampleSlotToPc(parseInt(slotStr, 10));
       });
@@ -3037,9 +3070,6 @@ const App = (() => {
 
   /** Seleziona uno slot wavetable del dispositivo: dettagli subito, preview in background. */
   async function selectWavetable(slot) {
-    document.querySelectorAll('#wt-list .wt-row').forEach((r) => {
-      r.classList.toggle('selected', parseInt(r.dataset.slot, 10) === slot);
-    });
     const token = ++state.wtReadToken;
     const cached = state.wtData[slot];
     if (cached) {
@@ -3084,9 +3114,6 @@ const App = (() => {
 
   /** Seleziona uno slot sample del dispositivo: dettagli subito, preview in background. */
   async function selectSample(slot) {
-    document.querySelectorAll('#sm-list .sm-row').forEach((r) => {
-      r.classList.toggle('selected', parseInt(r.dataset.slot, 10) === slot);
-    });
     const token = ++state.sampleReadToken;
     const cached = state.smData[slot];
     if (cached) {
@@ -3158,13 +3185,7 @@ const App = (() => {
     if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
     setBusy(true, `Renaming wavetable slot ${slot}…`);
     try {
-      let cached = state.wtData[slot];
-      if (!cached) {
-        const wt = await MF.readWavetable(slot);
-        if (!wt.data) throw new Error(`Wavetable slot ${slot} is empty`);
-        cached = { name: wt.name, data: wt.data };
-      }
-      await MF.writeWavetable(slot, { name: (newName || 'Wavetable').slice(0, 15), data: cached.data });
+      await MF.renameWavetable(slot, (newName || 'Wavetable').slice(0, 15));
       delete state.wtData[slot];
       if (state.wavetables) state.wavetables[slot - 1] = await MF.readWavetableHeader(slot);
       renderWavetables();
@@ -3191,13 +3212,7 @@ const App = (() => {
     if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
     setBusy(true, `Renaming sample slot ${slot}…`);
     try {
-      let cached = state.smData[slot];
-      if (!cached) {
-        const s = await MF.readSample(slot);
-        if (!s.data) throw new Error(`Sample slot ${slot} is empty`);
-        cached = { name: s.name, sizeBytes: s.sizeBytes, checksum: s.checksum, data: s.data };
-      }
-      await MF.writeSample(slot, (newName || 'Sample').slice(0, 12), cached.data);
+      await MF.renameSample(slot, (newName || 'Sample').slice(0, 12));
       delete state.smData[slot];
       if (state.samples) state.samples[slot - 1] = await MF.readSampleHeader(slot);
       renderSamples();
@@ -3218,6 +3233,255 @@ const App = (() => {
     renderSampleSidebar();
     renderSamplePc();
     renderSampleFromLib(id);
+  }
+
+  // ---------------------------------------------------------------- multi-selezione wavetable/sample
+
+  function handleWtSelect(e, slot) {
+    const ctrl = e.ctrlKey || e.metaKey;
+    const shift = e.shiftKey;
+    if (ctrl) {
+      if (state.wtSel.has(slot)) state.wtSel.delete(slot);
+      else {
+        state.wtSel.add(slot);
+        state.wtSelAnchor = slot;
+      }
+    } else if (shift) {
+      const anchor = state.wtSelAnchor !== null && state.wtSel.has(state.wtSelAnchor) ? state.wtSelAnchor : slot;
+      const [a, b] = anchor < slot ? [anchor, slot] : [slot, anchor];
+      state.wtSel.clear();
+      for (let s = a; s <= b; s++) state.wtSel.add(s);
+    } else {
+      state.wtSel.clear();
+      state.wtSel.add(slot);
+      state.wtSelAnchor = slot;
+    }
+    updateWtSelectionUI();
+  }
+
+  function handleSmSelect(e, slot) {
+    const ctrl = e.ctrlKey || e.metaKey;
+    const shift = e.shiftKey;
+    if (ctrl) {
+      if (state.smSel.has(slot)) state.smSel.delete(slot);
+      else {
+        state.smSel.add(slot);
+        state.smSelAnchor = slot;
+      }
+    } else if (shift) {
+      const anchor = state.smSelAnchor !== null && state.smSel.has(state.smSelAnchor) ? state.smSelAnchor : slot;
+      const [a, b] = anchor < slot ? [anchor, slot] : [slot, anchor];
+      state.smSel.clear();
+      for (let s = a; s <= b; s++) state.smSel.add(s);
+    } else {
+      state.smSel.clear();
+      state.smSel.add(slot);
+      state.smSelAnchor = slot;
+    }
+    updateSmSelectionUI();
+  }
+
+  function updateWtSelectionUI() {
+    document.querySelectorAll('#wt-list .wt-row').forEach((r) => {
+      r.classList.toggle('selected', state.wtSel.has(parseInt(r.dataset.slot, 10)));
+    });
+    const ids = Array.from(state.wtSel).sort((a, b) => a - b);
+    if (!ids.length) showDetailEmpty();
+    else if (ids.length === 1) selectWavetable(ids[0]);
+    else showWtMultiDetail(ids);
+  }
+
+  function updateSmSelectionUI() {
+    document.querySelectorAll('#sm-list .sm-row').forEach((r) => {
+      r.classList.toggle('selected', state.smSel.has(parseInt(r.dataset.slot, 10)));
+    });
+    const ids = Array.from(state.smSel).sort((a, b) => a - b);
+    if (!ids.length) showDetailEmpty();
+    else if (ids.length === 1) selectSample(ids[0]);
+    else showSmMultiDetail(ids);
+  }
+
+  function clearWtSelectionUi() {
+    state.wtSel.clear();
+    state.wtSelAnchor = null;
+    updateWtSelectionUI();
+  }
+
+  function clearSmSelectionUi() {
+    state.smSel.clear();
+    state.smSelAnchor = null;
+    updateSmSelectionUI();
+  }
+
+  function showWtMultiDetail(slots) {
+    renderDetail({
+      name: `${slots.length} wavetables selected`,
+      metaRows: [['Slots', slots.join(', ')]],
+      tags: [],
+      tagInput: null,
+      notes: null,
+      actions: [
+        { id: 'read', label: '⬅ Import to PC library', run: () => importWtSelectionToPc() },
+        { id: 'clear', label: '✕ Clear', run: () => clearWtSelection() },
+        { id: 'deselect', label: 'Deselect', run: () => clearWtSelectionUi() },
+      ],
+      params: [],
+      hideParams: true,
+    });
+  }
+
+  function showSmMultiDetail(slots) {
+    renderDetail({
+      name: `${slots.length} samples selected`,
+      metaRows: [['Slots', slots.join(', ')]],
+      tags: [],
+      tagInput: null,
+      notes: null,
+      actions: [
+        { id: 'read', label: '⬅ Import to PC library', run: () => importSmSelectionToPc() },
+        { id: 'clear', label: '✕ Clear', run: () => clearSmSelection() },
+        { id: 'deselect', label: 'Deselect', run: () => clearSmSelectionUi() },
+      ],
+      params: [],
+      hideParams: true,
+    });
+  }
+
+  async function importWtSelectionToPc() {
+    const slots = Array.from(state.wtSel).sort((a, b) => a - b);
+    if (!slots.length) return;
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    setBusy(true, 'Importing wavetables…');
+    let added = 0;
+    try {
+      for (let i = 0; i < slots.length; i++) {
+        const slot = slots[i];
+        const wt = await MF.readWavetable(slot);
+        if (wt.data) {
+          state.wtLib.push({
+            id: _libId(),
+            name: (wt.name || 'Wavetable').slice(0, 15),
+            dataB64: Mfp.bytesToB64(wt.data),
+            addedAt: Date.now(),
+            source: `MicroFreak slot ${slot}`,
+          });
+          added++;
+        }
+        setProgress((i + 1) / slots.length, `Wavetables ${i + 1}/${slots.length}`);
+      }
+      await saveWavetableLib();
+      renderWavetableSidebar();
+      renderWavetablePc();
+      toast(`Imported ${added} wavetable${added === 1 ? '' : 's'} to the PC library ✓`, 'ok');
+    } catch (e) {
+      toast('Import failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }
+
+  async function importSmSelectionToPc() {
+    const slots = Array.from(state.smSel).sort((a, b) => a - b);
+    if (!slots.length) return;
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    setBusy(true, 'Importing samples…');
+    let added = 0;
+    try {
+      for (let i = 0; i < slots.length; i++) {
+        const slot = slots[i];
+        const s = await MF.readSample(slot);
+        if (s.data) {
+          state.smLib.push({
+            id: _libId(),
+            name: (s.name || 'Sample').slice(0, 12),
+            dataB64: Mfp.bytesToB64(s.data),
+            sizeBytes: s.sizeBytes,
+            durationMs: Math.round((s.sizeBytes / 2 / 32000) * 1000),
+            addedAt: Date.now(),
+            source: `MicroFreak slot ${slot}`,
+          });
+          added++;
+        }
+        setProgress((i + 1) / slots.length, `Samples ${i + 1}/${slots.length}`);
+      }
+      await saveSampleLib();
+      renderSampleSidebar();
+      renderSamplePc();
+      toast(`Imported ${added} sample${added === 1 ? '' : 's'} to the PC library ✓`, 'ok');
+    } catch (e) {
+      toast('Import failed: ' + (e.message || e), 'err', 6000);
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }
+
+  async function clearWtSelection() {
+    const slots = Array.from(state.wtSel).sort((a, b) => a - b);
+    if (!slots.length) return;
+    const ok = await showModal('Clear wavetables',
+      `<p>Clear ${slots.length} wavetable slot${slots.length === 1 ? '' : 's'} on the MicroFreak?</p>`,
+      { okLabel: 'Clear' });
+    if (!ok) return;
+    setBusy(true, 'Clearing wavetables…');
+    let failed = 0;
+    try {
+      for (let i = 0; i < slots.length; i++) {
+        try {
+          await MF.clearWavetable(slots[i]);
+          delete state.wtData[slots[i]];
+        } catch {
+          failed++;
+        }
+        setProgress((i + 1) / slots.length, `Slots ${i + 1}/${slots.length}`);
+      }
+      if (state.wavetables) {
+        for (const s of slots) state.wavetables[s - 1] = await MF.readWavetableHeader(s);
+      }
+      renderWavetables();
+      clearWtSelectionUi();
+      toast(`Cleared ${slots.length - failed} wavetable slot${slots.length - failed === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''} ✓`, 'ok');
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }
+
+  async function clearSmSelection() {
+    const slots = Array.from(state.smSel).sort((a, b) => a - b);
+    if (!slots.length) return;
+    const ok = await showModal('Clear samples',
+      `<p>Clear ${slots.length} sample slot${slots.length === 1 ? '' : 's'} on the MicroFreak?</p>`,
+      { okLabel: 'Clear' });
+    if (!ok) return;
+    setBusy(true, 'Clearing samples…');
+    let failed = 0;
+    try {
+      for (let i = 0; i < slots.length; i++) {
+        try {
+          await MF.clearSample(slots[i]);
+          delete state.smData[slots[i]];
+        } catch {
+          failed++;
+        }
+        setProgress((i + 1) / slots.length, `Slots ${i + 1}/${slots.length}`);
+      }
+      if (state.samples) {
+        for (const s of slots) state.samples[s - 1] = await MF.readSampleHeader(s);
+      }
+      try {
+        state.sampleStats = await MF.readSampleStats();
+      } catch {
+        /* stats non disponibili */
+      }
+      renderSamples();
+      clearSmSelectionUi();
+      toast(`Cleared ${slots.length - failed} sample slot${slots.length - failed === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''} ✓`, 'ok');
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
   }
 
   // ------------------------------------------------------------------ librerie PC: wavetable e sample
@@ -4096,7 +4360,19 @@ const App = (() => {
     document.addEventListener('keydown', (e) => {
       const ae = document.activeElement;
       const typing = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
-      // le scorciatoie da tastiera valgono solo nella vista Presets
+      // le scorciatoie da tastiera valgono solo nella vista Presets (o nelle
+      // liste wavetable/sample: Esc deseleziona, Canc svuota gli slot selezionati)
+      if (state.activeTab === 'wavetables' || state.activeTab === 'samples') {
+        if (e.key === 'Escape' && !typing) {
+          if (state.activeTab === 'wavetables') clearWtSelectionUi();
+          else clearSmSelectionUi();
+        } else if ((e.key === 'Delete' || e.key === 'Backspace') && !typing) {
+          e.preventDefault();
+          if (state.activeTab === 'wavetables') clearWtSelection();
+          else clearSmSelection();
+        }
+        return;
+      }
       if (state.activeTab !== 'presets') return;
       if (e.key === 'Escape') {
         if (state.selLib.size && !typing) clearSelection();

@@ -1027,6 +1027,59 @@ async function test(name, fn) {
     assert.ok(!stub.calls.some((c) => c.op === 0x59), 'dopo la cancellazione non parte il corpo');
   });
 
+  await test('renameWavetable: solo header (corpo non toccato)', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const oldHeader = new Uint8Array(28);
+    oldHeader[0] = 0;
+    oldHeader[3] = 0;
+    oldHeader[8] = 0;
+    oldHeader[10] = 1;
+    oldHeader[11] = 1;
+    'Old'.split('').forEach((c, i) => { oldHeader[12 + i] = c.charCodeAt(0); });
+    const newHeader = new Uint8Array(oldHeader);
+    newHeader.fill(0, 12);
+    'New'.split('').forEach((c, i) => { newHeader[12 + i] = c.charCodeAt(0); });
+    const script = [
+      sysex(0, 0x15, []), sysex(0, 0x16, MF.pack7to8(oldHeader)),   // header attuale
+      ack(), ack(), ack(), ack(),                                    // setWavetableEntry (56,15,16,17)
+      sysex(0, 0x15, []), sysex(0, 0x16, MF.pack7to8(newHeader)),   // verifica
+    ];
+    stub.queue(...script);
+    const check = await MF.renameWavetable(1, 'New');
+    assert.strictEqual(check.name, 'New');
+    assert.ok(!check.empty);
+    // nessuna richiesta di parti (il corpo non viene mai letto/scritto)
+    assert.ok(!stub.calls.some((c) => c.op === 0x54 || c.op === 0x55));
+  });
+
+  await test('renameSample: solo header, conserva dimensione/checksum/indirizzo', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    const oldHeader = new Uint8Array(28);
+    oldHeader[0] = 0x10; oldHeader[1] = 0x28; oldHeader[2] = 0x00; oldHeader[3] = 0x00; // indirizzo
+    oldHeader[4] = 100; oldHeader[5] = 0; oldHeader[6] = 0; oldHeader[7] = 0;          // 100 byte
+    oldHeader[8] = 0x34; oldHeader[9] = 0x12;                                          // checksum
+    'Old'.split('').forEach((c, i) => { oldHeader[10 + i] = c.charCodeAt(0); });
+    oldHeader[23] = 0;
+    const newHeader = new Uint8Array(oldHeader);
+    newHeader.fill(0, 10, 23);
+    'New'.split('').forEach((c, i) => { newHeader[10 + i] = c.charCodeAt(0); });
+    const script = [
+      sysex(0, 0x15, []), sysex(0, 0x16, MF.pack7to8(oldHeader)),   // header attuale
+      ack(), ack(), ack(),                                            // resetSampleHeader (5A,15,17)
+      sysex(0, 0x15, []), sysex(0, 0x16, MF.pack7to8(newHeader)),   // verifica
+    ];
+    stub.queue(...script);
+    const check = await MF.renameSample(1, 'New');
+    assert.strictEqual(check.name, 'New');
+    assert.strictEqual(check.sizeBytes, 100);
+    assert.strictEqual(check.checksum, 0x1234);
+    assert.strictEqual(check.address, 0x2810);
+    // nessuna lettura del corpo (5D/58/59 non usate)
+    assert.ok(!stub.calls.some((c) => c.op === 0x59 || c.op === 0x5d || c.op === 0x58));
+  });
+
   // ================================================================== MFP: wavetable/sample
   console.log('Formati wavetable/sample (.mfw/.mfwz/.mfsample/WAV):');
 
