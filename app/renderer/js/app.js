@@ -116,6 +116,16 @@ const App = (() => {
     toastTimer = setTimeout(() => el.toast.classList.add('hidden'), ms);
   }
 
+  // errori globali: li mostriamo come toast invece di lasciare l'app muta
+  window.addEventListener('error', (e) => {
+    try { toast('Unexpected error: ' + (e.message || 'unknown'), 'err', 8000); } catch { /* ignora */ }
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e && e.reason;
+    const msg = r && (r.message || String(r)) || 'unknown';
+    try { toast('Unexpected error: ' + msg, 'err', 8000); } catch { /* ignora */ }
+  });
+
   function status(msg) {
     el.statusText.textContent = msg;
   }
@@ -285,7 +295,9 @@ const App = (() => {
       el.connStatus.title = `Connected: ${Midi.currentNames().output}`;
       status('Connected to the MicroFreak. Synchronizing…');
       // firmware + scansione automatica di preset, wavetable e sample
-      setTimeout(() => syncAllFromDevice(), 250);
+      setTimeout(() => {
+        syncAllFromDevice().catch((e) => toast('Sync failed: ' + (e && e.message || e), 'err', 6000));
+      }, 250);
     } catch (e) {
       el.connStatus.className = 'status-dot error';
       toast('Connection failed: ' + (e.message || e), 'err', 6000);

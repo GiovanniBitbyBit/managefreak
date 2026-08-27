@@ -8,6 +8,15 @@ const fsp = fs.promises;
 
 let mainWindow = null;
 
+function logCrash(msg) {
+  try {
+    const p = path.join(app.getPath('userData'), 'crash.log');
+    fs.appendFileSync(p, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch {
+    /* il log non deve mai rompere l'app */
+  }
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1480,
@@ -32,6 +41,19 @@ function createWindow() {
 
   mainWindow.removeMenu();
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  // se il processo di rendering crasha (es. driver MIDI instabile),
+  // registra l'evento e ricarica automaticamente la finestra
+  mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    logCrash('renderer crashed: ' + JSON.stringify(details));
+    setTimeout(() => {
+      try {
+        mainWindow.reload();
+      } catch {
+        /* finestra già chiusa */
+      }
+    }, 600);
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -315,4 +337,11 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+process.on('uncaughtException', (err) => {
+  logCrash('main uncaughtException: ' + (err && err.stack || err));
+});
+process.on('unhandledRejection', (err) => {
+  logCrash('main unhandledRejection: ' + (err && err.stack || err));
 });
