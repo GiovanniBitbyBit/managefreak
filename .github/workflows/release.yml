@@ -47,8 +47,6 @@ jobs:
             app/dist/*.deb
             app/dist/*.dmg
             app/dist/*.zip
-            app/dist/*.blockmap
-            app/dist/*.yml
           if-no-files-found: error
 
   release:
