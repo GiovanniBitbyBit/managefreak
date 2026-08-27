@@ -1618,13 +1618,13 @@ const App = (() => {
           <div class="card-head">
             <p class="card-name">${esc(e.name)}</p>
             <span class="fav ${e.favorite ? 'on' : ''}" data-act="fav" title="Favorite">★</span>
+            <span class="card-slotnum">${num}</span>
           </div>
           <div class="card-rating">${ratingStarsHtml(e.rating, { interactive: true, id: e.id })}</div>
           <div class="card-tags">
             ${catLabel ? `<span class="chip" style="border-color:${catColorUsed}">${esc(catLabel)}</span>` : ''}
           </div>
           ${chars ? `<div class="char-chips">${chars}</div>` : ''}
-          <span class="card-slotnum">${num}</span>
           <div class="card-actions">
             <button class="btn small" data-act="write" title="Send to MicroFreak">➡ Send</button>
             <button class="btn small" data-act="export" title="Export .mfp">⭳ .mfp</button>

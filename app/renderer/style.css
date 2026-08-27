@@ -570,14 +570,12 @@ select {
 .lib-card .card-head { display: flex; align-items: flex-start; gap: 6px; }
 .lib-card .card-name { font-weight: 700; margin: 0; flex: 1; word-break: break-word; }
 .card-slotnum {
-  position: absolute;
-  right: 10px;
-  bottom: 50px;
-  font-size: 24px;
+  font-size: 20px;
   font-weight: 700;
   color: #3f3f4c;
   font-variant-numeric: tabular-nums;
-  pointer-events: none;
+  line-height: 1;
+  margin-top: 1px;
   user-select: none;
 }
 .lib-card .fav, .lib-row .fav { cursor: pointer; color: var(--muted); font-size: 15px; user-select: none; }
