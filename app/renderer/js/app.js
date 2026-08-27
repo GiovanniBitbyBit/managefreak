@@ -204,15 +204,30 @@ const App = (() => {
 
   // ------------------------------------------------------------------ MIDI / porte
 
+  /** Popola i selettori MIDI con il solo segnaposto (mai vuoti). */
+  function fillEmptySelects() {
+    const fill = (select, emptyLabel) => {
+      select.innerHTML = '';
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = emptyLabel;
+      select.appendChild(opt);
+    };
+    fill(el.midiInput, '— MIDI input —');
+    fill(el.midiOutput, '— MIDI output —');
+  }
+
   async function refreshPorts() {
     if (!Midi.supported()) {
       toast('Web MIDI is not available in this environment.', 'err', 6000);
+      fillEmptySelects();
       return;
     }
     try {
       await Midi.refresh();
     } catch (e) {
       toast('MIDI access denied: ' + (e.message || e), 'err', 6000);
+      fillEmptySelects();
       return;
     }
     const inputs = Midi.inputs();

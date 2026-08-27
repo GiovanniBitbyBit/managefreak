@@ -1,7 +1,7 @@
 // ManageFreak — Electron main process
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
@@ -299,6 +299,14 @@ ipcMain.handle('dialog:export-bank', async (_e, files) => {
 });
 
 app.whenReady().then(() => {
+  // Web MIDI: nelle app impacchettate le richieste di accesso ai dispositivi
+  // MIDI vengono negate senza un handler esplicito (i selettori restano vuoti).
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(permission === 'midi' || permission === 'midiSysex');
+  });
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => {
+    return permission === 'midi' || permission === 'midiSysex';
+  });
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
