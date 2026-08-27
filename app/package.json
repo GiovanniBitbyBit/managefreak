@@ -1,7 +1,7 @@
 {
   "name": "managefreak",
   "productName": "ManageFreak",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Open-source preset manager for the Arturia MicroFreak (Windows/macOS/Linux)",
   "main": "main.js",
   "author": {
