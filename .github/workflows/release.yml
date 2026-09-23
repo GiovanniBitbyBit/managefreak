@@ -81,6 +81,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      # serve per leggere le note di release versionate in .github/release-notes/
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -97,7 +99,24 @@ jobs:
             echo "::error::Nessun artefatto scaricato: la release non va pubblicata a vuoto"
             exit 1
           fi
-      - name: Publish GitHub Release
+      - name: Publish GitHub Release (curated notes)
+        # se esiste .github/release-notes/<tag>.md si usa quello come corpo della
+        # release (contiene anche la guida "quale file scaricare")
+        if: hashFiles(format('.github/release-notes/{0}.md', github.ref_name)) != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.exe
+            artifacts/*.dmg
+            artifacts/*.zip
+            artifacts/*.AppImage
+            artifacts/*.deb
+            artifacts/*.yml
+            artifacts/*.blockmap
+          fail_on_unmatched_files: true
+          body_path: .github/release-notes/${{ github.ref_name }}.md
+      - name: Publish GitHub Release (generated notes)
+        if: hashFiles(format('.github/release-notes/{0}.md', github.ref_name)) == ''
         uses: softprops/action-gh-release@v2
         with:
           files: |
