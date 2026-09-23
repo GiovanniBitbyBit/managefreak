@@ -26,6 +26,11 @@ jobs:
       - name: Run tests
         run: npm test
         working-directory: app
+      - name: Check native MIDI module loads
+        # il prebuild del modulo nativo deve esistere per la piattaforma: si verifica
+        # solo il caricamento (costruire porte MIDI fallirebbe sui runner senza ALSA)
+        run: node -e "require('@julusian/midi'); console.log('native MIDI module loaded OK on', process.platform, process.arch);"
+        working-directory: app
 
   build:
     name: Build (${{ matrix.os }})
@@ -58,7 +63,9 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Build installers
-        run: npx electron-builder ${{ matrix.args }}
+        # --publish never: in CI si compila soltanto; senza questo flag
+        # electron-builder tenta di pubblicare su GitHub e fallisce (nessun token)
+        run: npx electron-builder ${{ matrix.args }} --publish never
         working-directory: app
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
