@@ -84,8 +84,28 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Check that the artifacts were downloaded
+        # senza questo controllo una release "vuota" (come è successo) risulta
+        # riuscita pur non allegando nulla: meglio fallire in modo esplicito
+        run: |
+          echo "Contenuto scaricato:"
+          find artifacts -type f -printf '%p\n' | head -40
+          count=$(find artifacts -type f | wc -l)
+          echo "file totali: $count"
+          if [ "$count" -eq 0 ]; then
+            echo "::error::Nessun artefatto scaricato: la release non va pubblicata a vuoto"
+            exit 1
+          fi
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**
+          files: |
+            artifacts/*.exe
+            artifacts/*.dmg
+            artifacts/*.zip
+            artifacts/*.AppImage
+            artifacts/*.deb
+            artifacts/*.yml
+            artifacts/*.blockmap
+          fail_on_unmatched_files: true
           generate_release_notes: true
