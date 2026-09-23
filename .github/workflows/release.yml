@@ -49,9 +49,11 @@ jobs:
         run: npm test
         working-directory: app
       - name: Check native MIDI module loads
-        # il modulo nativo (RtMidi) deve caricarsi sul sistema che compila: se il
-        # binario precompilato manca, meglio saperlo qui che a release pubblicata
-        run: node -e "const m=require('@julusian/midi'); const i=new m.Input(); const o=new m.Output(); console.log('RtMidi ok -', i.getPortCount(), 'in /', o.getPortCount(), 'out');"
+        # Verifica che il binario precompilato per QUESTA piattaforma sia presente e
+        # caricabile (è l'obiettivo del controllo). Non si costruiscono porte MIDI:
+        # su un runner CI non esiste il sequencer ALSA (/dev/snd/seq), quindi
+        # new Input() fallirebbe pur essendo tutto a posto.
+        run: node -e "require('@julusian/midi'); console.log('native MIDI module loaded OK on', process.platform, process.arch);"
         working-directory: app
       - name: Build installers
         # --publish never: gli artefatti (compreso latest.yml) li pubblica il job "release",
