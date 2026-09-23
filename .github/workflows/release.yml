@@ -99,10 +99,24 @@ jobs:
             echo "::error::Nessun artefatto scaricato: la release non va pubblicata a vuoto"
             exit 1
           fi
+      - name: Look for curated release notes
+        id: notes
+        # controllo esplicito con test -f: hashFiles() in una condizione if non
+        # ha trovato il file (verificato su questa release) e il ramo curato
+        # veniva saltato in silenzio
+        run: |
+          f=".github/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$f" ]; then
+            echo "path=$f" >> "$GITHUB_OUTPUT"
+            echo "note curate trovate: $f"
+          else
+            echo "path=" >> "$GITHUB_OUTPUT"
+            echo "nessuna nota curata per ${GITHUB_REF_NAME}: si usano le note automatiche"
+          fi
       - name: Publish GitHub Release (curated notes)
         # se esiste .github/release-notes/<tag>.md si usa quello come corpo della
         # release (contiene anche la guida "quale file scaricare")
-        if: hashFiles(format('.github/release-notes/{0}.md', github.ref_name)) != ''
+        if: steps.notes.outputs.path != ''
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -114,9 +128,9 @@ jobs:
             artifacts/*.yml
             artifacts/*.blockmap
           fail_on_unmatched_files: true
-          body_path: .github/release-notes/${{ github.ref_name }}.md
+          body_path: ${{ steps.notes.outputs.path }}
       - name: Publish GitHub Release (generated notes)
-        if: hashFiles(format('.github/release-notes/{0}.md', github.ref_name)) == ''
+        if: steps.notes.outputs.path == ''
         uses: softprops/action-gh-release@v2
         with:
           files: |
