@@ -5,6 +5,9 @@ const { app, BrowserWindow, ipcMain, dialog, shell, session } = require('electro
 const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
+// MIDI nativo (RtMidi: WinMM/CoreMIDI/ALSA) nel processo principale: lo strato
+// Web MIDI di Chromium su Windows può smettere di enumerare i dispositivi.
+const midiBackend = require('./midi-backend');
 
 let mainWindow = null;
 
@@ -56,7 +59,39 @@ function createWindow() {
   });
 
   mainWindow.on('closed', () => {
+    midiBackend.setWindow(null);
     mainWindow = null;
+  });
+
+  // il backend MIDI nativo manda i messaggi in arrivo alla finestra
+  midiBackend.setWindow(mainWindow);
+
+  // Prima di chiudere la finestra: avvisa il renderer, che rilascia le porte MIDI.
+  // Senza questo rilascio Windows resta con il MicroFreak occupato e al successivo
+  // avvio l'app non vede più nessuna porta MIDI ("la prima volta funziona, poi no").
+  let quitting = false;
+  mainWindow.on('close', (e) => {
+    if (quitting) return;
+    e.preventDefault();
+    quitting = true;
+    try {
+      mainWindow.webContents.send('app:prepare-quit');
+    } catch {
+      /* renderer già andato */
+    }
+    // un attimo per far chiudere le porte al renderer, poi si chiude davvero
+    setTimeout(() => {
+      try {
+        midiBackend.shutdown(); // rilascio nativo delle porte MIDI
+      } catch {
+        /* niente da fare mentre si esce */
+      }
+      try {
+        mainWindow.destroy();
+      } catch {
+        /* già chiusa */
+      }
+    }, 600);
   });
 
   if (process.argv.includes('--screenshots')) {
@@ -201,16 +236,81 @@ function resolveInUserData(p) {
   return resolved;
 }
 
+// L'aggiornamento automatico è possibile solo nell'app installata su Windows
+// (installer NSIS): la versione portable e le build macOS/Linux non hanno un
+// canale di update — lì si offre il controllo manuale con link alla release.
+const canAutoUpdate = process.platform === 'win32' && !process.env.PORTABLE_EXECUTABLE_DIR;
+
 ipcMain.handle('app:info', () => ({
   version: app.getVersion(),
   userData: userDataRoot(),
   platform: process.platform,
+  canAutoUpdate,
 }));
 
 ipcMain.handle('app:open-user-data', async () => {
   await shell.openPath(userDataRoot());
   return true;
 });
+
+/** Apre un link nel browser di sistema, solo per domini fidati. */
+ipcMain.handle('app:open-external', async (_e, url) => {
+  const ok = typeof url === 'string' && /^https:\/\/(github\.com|www\.arturia\.com|ko-fi\.com)\//i.test(url);
+  if (!ok) return false;
+  await shell.openExternal(url);
+  return true;
+});
+
+/** Confronto di versioni "1.2.3" → true se a è più recente di b. */
+function isNewerVersion(a, b) {
+  const pa = String(a || '').replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = String(b || '').replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) > (pb[i] || 0)) return true;
+    if ((pa[i] || 0) < (pb[i] || 0)) return false;
+  }
+  return false;
+}
+
+async function fetchLatestRelease() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const res = await fetch('https://api.github.com/repos/GiovanniBitbyBit/managefreak/releases/latest', {
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'ManageFreak' },
+      signal: ctrl.signal,
+    });
+    if (!res.ok) return { error: 'HTTP ' + res.status };
+    const j = await res.json();
+    return { version: j.tag_name || '', name: j.name || '', body: j.body || '', url: j.html_url || '' };
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ultima release pubblicata su GitHub (per il menu About: versione + changelog)
+ipcMain.handle('app:latest-release', () => fetchLatestRelease());
+
+// Nessun aggiornamento automatico su questa piattaforma: il check diventa un
+// confronto con l'ultima release, con link per scaricarla a mano.
+if (!canAutoUpdate) {
+  ipcMain.handle('update:action', async (_e, action) => {
+    if (action !== 'check') return { unsupported: true, platform: process.platform };
+    const rel = await fetchLatestRelease();
+    if (rel.error) return { unsupported: true, platform: process.platform, error: rel.error };
+    const current = app.getVersion();
+    return {
+      unsupported: true,
+      platform: process.platform,
+      current,
+      latest: rel.version,
+      hasUpdate: isNewerVersion(rel.version, current),
+      url: rel.url || 'https://github.com/GiovanniBitbyBit/managefreak/releases/latest',
+    };
+  });
+}
 
 ipcMain.handle('fs:read', async (_e, p) => {
   const full = resolveInUserData(p);
@@ -240,6 +340,157 @@ ipcMain.handle('fs:list', async (_e, p) => {
   const entries = await fsp.readdir(full, { withFileTypes: true });
   return entries.map((e) => ({ name: e.name, dir: e.isDirectory() }));
 });
+
+// ---------------------------------------------------------------------------
+// Auto-update (electron-updater)
+// ---------------------------------------------------------------------------
+
+let updaterEngine = null;
+let updateDownloaded = false;
+let autoCheckPending = false; // true durante il check automatico all'avvio
+let updatePhase = 'idle'; // idle | check | download | install (per gli errori)
+
+function sendUpdateEvent(payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  // nelle modalità di test (smoke/screenshots) non aprire dialoghi di update
+  if (process.argv.includes('--smoke') || process.argv.includes('--screenshots')) return;
+  mainWindow.webContents.send('update-event', payload);
+}
+
+function extractReleaseNotes(info) {
+  let notes = info && info.releaseNotes;
+  if (Array.isArray(notes)) {
+    notes = notes
+      .map((n) => (typeof n === 'string' ? n : (n && n.note) || ''))
+      .filter(Boolean)
+      .join('\n\n');
+  }
+  return typeof notes === 'string' && notes.trim() ? notes : '';
+}
+
+function initAutoUpdater() {
+  // l'auto-update funziona solo nell'app impacchettata (installer NSIS);
+  // in sviluppo (`npm start`), nella versione portable e su macOS/Linux non
+  // parte nulla: lì il menu About usa il controllo manuale (vedi canAutoUpdate).
+  if (!app.isPackaged || !canAutoUpdate) return;
+  let au;
+  try {
+    ({ autoUpdater: au } = require('electron-updater'));
+  } catch (e) {
+    logCrash('updater require failed: ' + String(e));
+    return;
+  }
+  updaterEngine = au;
+
+  // feed di test locale (senza push sulla repo): es. MF_UPDATE_FEED=http://localhost:8080
+  if (process.env.MF_UPDATE_FEED) {
+    try {
+      au.setFeedURL({ provider: 'generic', url: process.env.MF_UPDATE_FEED });
+    } catch (e) {
+      logCrash('updater setFeedURL failed: ' + String(e));
+    }
+  }
+
+  au.autoDownload = false; // il consenso arriva dal renderer
+  au.autoInstallOnAppQuit = false; // si installa solo con "Riavvia ora"
+  au.logger = {
+    info: () => {},
+    warn: () => {},
+    error: (m) => logCrash('updater: ' + String(m && m.stack || m)),
+  };
+
+  au.on('checking-for-update', () => sendUpdateEvent({ type: 'checking' }));
+  au.on('update-available', (info) => {
+    sendUpdateEvent({
+      type: 'available',
+      version: info && info.version,
+      releaseNotes: extractReleaseNotes(info),
+      releaseDate: info && info.releaseDate,
+    });
+  });
+  au.on('update-not-available', (info) => {
+    sendUpdateEvent({ type: 'not-available', version: info && info.version });
+  });
+  au.on('download-progress', (p) => {
+    sendUpdateEvent({
+      type: 'progress',
+      percent: Math.round((p.percent || 0) * 10) / 10,
+      transferred: p.transferred || 0,
+      total: p.total || 0,
+      bytesPerSecond: p.bytesPerSecond || 0,
+    });
+  });
+  au.on('update-downloaded', (info) => {
+    updateDownloaded = true;
+    sendUpdateEvent({ type: 'downloaded', version: info && info.version });
+  });
+  au.on('error', (err) => {
+    logCrash('updater error: ' + (err && err.stack || err));
+    // gli errori del check automatico all'avvio restano silenziosi; se però
+    // l'utente ha avviato lui download/installazione, l'errore deve arrivare
+    const phase = updatePhase;
+    const userInitiated = phase === 'download' || phase === 'install';
+    sendUpdateEvent({
+      type: 'error',
+      message: String((err && err.message) || err),
+      phase,
+      silent: autoCheckPending && !userInitiated,
+    });
+    updatePhase = 'idle';
+  });
+
+  ipcMain.handle('update:action', async (_e, action) => {
+    try {
+      switch (action) {
+        case 'check':
+          updatePhase = 'check';
+          await au.checkForUpdates();
+          updatePhase = 'idle';
+          return true;
+        case 'download':
+          if (!updateDownloaded) {
+            updatePhase = 'download';
+            await au.downloadUpdate();
+            updatePhase = 'idle';
+          }
+          return true;
+        case 'install':
+          if (updateDownloaded) {
+            updatePhase = 'install';
+            // piccola pausa così il renderer mostra lo stato prima della chiusura
+            setTimeout(() => {
+              try {
+                au.quitAndInstall(false, true);
+              } catch (e) {
+                logCrash('updater quitAndInstall failed: ' + String(e));
+              }
+            }, 250);
+          }
+          return true;
+        case 'later':
+          // "più tardi" NON annulla il download già fatto: l'aggiornamento
+          // resta pronto e installabile dal menu dell'app
+          return true;
+        default:
+          return false;
+      }
+    } catch (e) {
+      logCrash('updater action ' + action + ' failed: ' + String(e && e.stack || e));
+      sendUpdateEvent({ type: 'error', message: String((e && e.message) || e), phase: updatePhase });
+      updatePhase = 'idle';
+      return false;
+    }
+  });
+
+  // controllo automatico all'avvio (con un piccolo ritardo per non rallentare lo startup)
+  setTimeout(() => {
+    if (updaterEngine !== au) return;
+    autoCheckPending = true;
+    au.checkForUpdates()
+      .catch(() => { /* gli errori arrivano già come evento */ })
+      .finally(() => { autoCheckPending = false; });
+  }, 5000);
+}
 
 // ---------------------------------------------------------------------------
 // IPC: dialogs (user-selected paths are allowed anywhere)
@@ -320,6 +571,16 @@ ipcMain.handle('dialog:export-bank', async (_e, files) => {
   return folder;
 });
 
+// ---------------------------------------------------------------- MIDI nativo
+// Il renderer parla al MIDI attraverso questi canali; se il modulo nativo non è
+// disponibile risponde ok:false e il renderer ripiega su Web MIDI.
+ipcMain.handle('midi:status', () => midiBackend.status());
+ipcMain.handle('midi:list', () => midiBackend.list());
+ipcMain.handle('midi:open', (_e, inputId, outputId) => midiBackend.open(inputId, outputId));
+ipcMain.handle('midi:close', () => midiBackend.close());
+ipcMain.handle('midi:send', (_e, bytes) => midiBackend.send(bytes));
+ipcMain.handle('midi:shutdown', () => midiBackend.shutdown());
+
 app.whenReady().then(() => {
   // Web MIDI: nelle app impacchettate le richieste di accesso ai dispositivi
   // MIDI vengono negate senza un handler esplicito (i selettori restano vuoti).
@@ -329,6 +590,7 @@ app.whenReady().then(() => {
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => {
     return permission === 'midi' || permission === 'midiSysex';
   });
+  initAutoUpdater();
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

@@ -15,6 +15,13 @@
   /* colore di selezione: giallo in dark mode (visibile sul fondo scuro) */
   --sel: var(--yellow);
   --sel-bg: rgba(232, 194, 90, .12);
+  /* barra di scorrimento: valori del tema scuro (default) */
+  --sb-thumb: #33333f;
+  --sb-thumb-hover: #3d3d4c;
+  --star-hover: #f0d060;
+  --render-bg: #12121a;
+  --dot-offline: #666;
+  --dot-empty: #4a4a58;
 }
 
 /* ---------------------------------------------------------------- tema chiaro */
@@ -35,9 +42,15 @@
   /* selezione blu in light mode: il giallo sarebbe invisibile sul bianco */
   --sel: var(--accent2);
   --sel-bg: rgba(90, 104, 201, .10);
+  /* barra di scorrimento chiara: le barre scure stonavano sul fondo bianco */
+  --sb-thumb: #c9c9d6;
+  --sb-thumb-hover: #b3b3c2;
+  --star-hover: #a8841a;
+  --render-bg: #f7f7fb;
+  --dot-offline: #5f5f6e;
+  --dot-empty: #7c7c8c;
 }
-:root[data-theme="light"] .btn:hover { background: #e0e0e9; }
-:root[data-theme="light"] .sel-bar .btn:hover { background: #e0e0e9; }
+:root[data-theme="light"] .btn:not(.primary):hover { background: #e0e0e9; }
 :root[data-theme="light"] .slot-row.empty-row,
 :root[data-theme="light"] .slot-row.init-row { background: #e6e6ee; border-color: #dad9e4; }
 :root[data-theme="light"] .slot-row.empty-row:hover,
@@ -82,7 +95,8 @@ button, input, select, textarea {
   border-bottom: 1px solid var(--border);
 }
 
-.brand { display: flex; align-items: baseline; gap: 8px; min-width: 300px; }
+.brand-wrap { position: relative; display: flex; align-items: center; }
+.brand { display: flex; align-items: baseline; gap: 8px; min-width: 300px; cursor: pointer; user-select: none; }
 .logo { color: var(--accent); font-size: 20px; }
 .brand-name { font-weight: 700; font-size: 16px; letter-spacing: .3px; }
 .brand-fw {
@@ -95,6 +109,58 @@ button, input, select, textarea {
   font-variant-numeric: tabular-nums;
 }
 .brand-sub { color: var(--muted); font-size: 12px; }
+
+/* ---------------------------------------------------------------- menu app (About / Updates) */
+.app-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 130;
+  width: 400px;
+  max-width: calc(100vw - 24px);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .45);
+  padding: 14px;
+}
+.app-menu-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 14px;
+}
+.app-menu-title .logo { font-size: 18px; }
+.app-menu-version { color: var(--muted); font-weight: 600; font-variant-numeric: tabular-nums; }
+.app-menu-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--muted);
+  margin: 12px 0 6px;
+}
+.app-menu-changelog {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.app-menu-changelog h1, .app-menu-changelog h2, .app-menu-changelog h3 {
+  font-size: 13px;
+  margin: 8px 0 3px;
+}
+.app-menu-changelog ul { margin: 3px 0 3px 16px; padding: 0; }
+.app-menu-changelog p { margin: 4px 0; }
+.app-menu-actions { display: flex; gap: 8px; margin-top: 12px; }
+.app-menu-note { font-size: 11px; color: var(--muted); margin-top: 10px; line-height: 1.35; }
+.app-menu-actions .app-menu-note { margin-top: 0; margin-right: auto; max-width: 240px; }
 
 .device-controls {
   margin-left: auto;
@@ -132,11 +198,11 @@ select {
 .status-dot {
   width: 12px; height: 12px;
   border-radius: 50%;
-  background: #666;
+  background: var(--dot-offline);
   display: inline-block;
 }
 .status-dot.online { background: var(--green); box-shadow: 0 0 6px var(--green); }
-.status-dot.offline { background: #666; }
+.status-dot.offline { background: var(--dot-offline); }
 .status-dot.error { background: var(--red); }
 
 :root {
@@ -247,7 +313,10 @@ select {
   grid-column: 3;
   grid-row: 3;
   height: var(--h-detail, 250px);
-  border-top: 1px solid var(--border);
+  /* box chiuso: prima c'era solo il bordo superiore, che "finiva" nel vuoto
+     8px prima del pannello di destra e dopo la sidebar (linea interrotta) */
+  border: 1px solid var(--border);
+  border-bottom: none;
   background: var(--panel);
   overflow-y: auto;
   padding: 10px 14px;
@@ -286,7 +355,7 @@ select {
 .legend { margin-top: 12px; font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
 .legend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
 .dot.full { background: var(--green); }
-.dot.empty { background: #4a4a58; }
+.dot.empty { background: var(--dot-empty); }
 .dot.err { background: var(--red); }
 
 #cat-list, #tag-list, #lib-list { display: flex; flex-direction: column; gap: 2px; }
@@ -345,7 +414,7 @@ select {
 
 /* ---------------------------------------------------------------- device panel (destra) */
 
-.slot-list { display: flex; flex-direction: column; gap: 4px; padding: 6px; }
+.slot-list { display: flex; flex-direction: column; gap: 9px; padding: 6px; }
 
 .slot-row {
   display: grid;
@@ -363,8 +432,27 @@ select {
 .slot-row.selected .slot-name { color: var(--text); }
 .slot-row.drag-over { border-color: var(--accent); background: rgba(255, 138, 61, .08); }
 .slot-row.swap-over { border-color: var(--sel); background: var(--sel-bg); }
-.slot-row.drop-before { box-shadow: inset 0 3px 0 var(--accent); }
-.slot-row.drop-after { box-shadow: inset 0 -3px 0 var(--accent); }
+/* indicatore di inserimento: UNA sola barretta, sempre nella stessa posizione,
+   centrata nel gap fra la riga sopra e quella sotto (non più un bordo interno
+   alla riga, che appariva "attaccato" all'uno o all'altro preset) */
+.slot-row, .lib-row, .wt-row, .sm-row { position: relative; }
+.slot-row.drop-before::after, .slot-row.drop-after::after,
+.lib-row.drop-before::after, .lib-row.drop-after::after,
+.wt-row.drop-before::after, .wt-row.drop-after::after,
+.sm-row.drop-before::after, .sm-row.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.slot-row.drop-before::after, .lib-row.drop-before::after,
+.wt-row.drop-before::after, .sm-row.drop-before::after { top: -6px; }
+.slot-row.drop-after::after, .lib-row.drop-after::after,
+.wt-row.drop-after::after, .sm-row.drop-after::after { bottom: -6px; }
 .slot-row.empty-row,
 .slot-row.init-row {
   background: #33333d;
@@ -372,6 +460,16 @@ select {
 }
 .slot-row.empty-row:hover,
 .slot-row.init-row:hover { background: #3a3a45; }
+/* le righe Init/vuote selezionate devono mostrare il riquadro di selezione */
+.slot-row.selected.empty-row,
+.slot-row.selected.init-row {
+  background: var(--sel-bg);
+  border-color: var(--sel);
+}
+.slot-row.selected.empty-row .slot-name,
+.slot-row.selected.init-row .slot-name { color: var(--text); }
+.slot-row.selected.empty-row .slot-num,
+.slot-row.selected.init-row .slot-num { color: var(--muted); }
 .slot-row .slot-num { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
 .slot-row .slot-name {
   font-weight: 600;
@@ -442,17 +540,11 @@ select {
   gap: 10px;
 }
 
-.lib-grid.drop-slot {
-  outline: 2px dashed var(--accent);
-  outline-offset: -4px;
-  border-radius: 12px;
-}
-
 /* vista a colonna */
 .lib-grid.lib-list-view {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 9px;
 }
 
 /* barra selezione multipla — colori della interfaccia, sticky */
@@ -495,16 +587,33 @@ select {
 .lib-row .row-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lib-row .row-tags { display: flex; flex-wrap: wrap; gap: 3px; overflow: hidden; max-height: 24px; }
 .lib-row .row-coll { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lib-row .row-actions { display: flex; gap: 4px; justify-content: flex-end; opacity: 0; transition: opacity .12s; }
-.lib-row:hover .row-actions { opacity: 1; }
+/* i pulsanti della vista a lista sono sempre visibili (come nella vista a box) */
+.lib-row .row-actions { display: flex; gap: 4px; justify-content: flex-end; opacity: 1; }
 
 /* indicatori di posizionamento durante il drag & drop */
-/* vista a colonna: sopra / sotto */
-.lib-row.drop-before { box-shadow: inset 0 3px 0 var(--accent); }
-.lib-row.drop-after { box-shadow: inset 0 -3px 0 var(--accent); }
-/* vista a griglia: a sinistra / a destra */
-.lib-card.drop-left { box-shadow: -3px 0 0 0 var(--accent); }
-.lib-card.drop-right { box-shadow: 3px 0 0 0 var(--accent); }
+/* vista a griglia: barretta VERTICALE centrata nel gap fra due card
+   (stessa logica della vista a lista, ruotata di 90°) */
+.lib-card.drop-left::before,
+.lib-card.drop-right::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.lib-card.drop-left::before { left: -6.5px; }
+.lib-card.drop-right::before { right: -6.5px; }
+
+/* durante un trascinamento la riga sotto il puntatore non deve accendere anche
+   il proprio bordo/alone di hover: l'unica indicazione è la barretta sopra */
+body.mf-dragging .lib-row:hover:not(.selected) { border-color: transparent; }
+body.mf-dragging .lib-card:hover:not(.selected) { border-color: transparent; transform: none; }
+body.mf-dragging .slot-row:hover:not(.selected) { background: transparent; }
+body.mf-dragging .wt-row:hover:not(.selected),
+body.mf-dragging .sm-row:hover:not(.selected) { background: transparent; }
 
 /* valutazione a stelle */
 .rating-stars { display: inline-flex; gap: 1px; line-height: 1; }
@@ -515,10 +624,13 @@ select {
 }
 .rating-stars .star.on { color: var(--yellow); }
 .rating-stars[data-rating] .star { cursor: pointer; }
-.rating-stars[data-rating] .star.hover-on { color: #f0d060; }
+.rating-stars[data-rating] .star.hover-on { color: var(--star-hover); }
 .card-rating { margin: 2px 0 6px; }
 #detail-rating { margin-top: 4px; }
 #detail-rating .rating-stars .star { font-size: 18px; }
+/* stelle e pulsanti del preset sulla stessa riga */
+.detail-coll-rating .rating-actions { display: flex; align-items: center; gap: 44px; margin-top: 2px; }
+#detail-pane .detail-actions.inline { margin: 0; display: flex; gap: 6px; flex-wrap: wrap; }
 
 /* caratteristiche Arturia */
 .char-chip {
@@ -709,6 +821,136 @@ select {
 .modal label { font-size: 12px; color: var(--muted); }
 .modal .field { margin-bottom: 8px; }
 
+/* ---------------------------------------------------------------- volume picker (dB) */
+.vol-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 2px;
+}
+.vol-picker input[type="range"] {
+  flex: 1;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.vol-min, .vol-max {
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 44px;
+}
+.vol-max { text-align: right; }
+.vol-value {
+  font-size: 26px;
+  font-weight: 700;
+  text-align: center;
+  color: var(--accent);
+  margin: 4px 0 2px;
+  letter-spacing: .5px;
+}
+.vol-value.vol-zero { color: var(--muted); }
+
+/* ---------------------------------------------------------------- riepilogo volume (stile vista a lista) */
+.vol-summary { display: flex; flex-direction: column; margin: 10px 0 6px; }
+.vol-summary-header, .vol-summary-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 130px 78px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+}
+.vol-summary-header {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--muted);
+  padding-bottom: 4px;
+}
+.vol-summary-header span:last-child, .vsi-vol { text-align: right; }
+.vol-summary-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.vol-summary-item {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: var(--bg2);
+}
+.vol-summary-item:hover { border-color: var(--accent2); }
+.vsi-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vsi-cat { overflow: hidden; white-space: nowrap; }
+.vsi-cat .chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.vsi-none { color: var(--muted); }
+.vsi-vol { color: var(--accent); font-weight: 600; white-space: nowrap; }
+.vsi-locked { color: var(--muted); font-weight: 400; font-style: italic; font-size: 11px; }
+.vol-note { font-size: 11px; color: var(--muted); margin: 4px 0 8px; }
+.vol-warn {
+  border: 1px solid var(--yellow);
+  background: rgba(232, 162, 90, .12);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  margin: 8px 0;
+}
+
+/* ---------------------------------------------------------------- update modal */
+#update-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 110;
+}
+#update-modal {
+  width: 520px;
+  max-width: 94vw;
+}
+#update-title { display: flex; align-items: center; gap: 8px; }
+#update-body { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+#update-changelog {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#update-changelog h1, #update-changelog h2, #update-changelog h3 {
+  font-size: 14px;
+  margin: 10px 0 4px;
+}
+#update-changelog ul { margin: 4px 0 4px 18px; padding: 0; }
+#update-changelog p { margin: 4px 0; }
+#update-progress {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.update-progress-bar {
+  flex: 1;
+  height: 10px;
+  background: var(--bg3);
+  border-radius: 5px;
+  overflow: hidden;
+}
+#update-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width .15s;
+}
+#update-progress-text { min-width: 130px; text-align: right; font-size: 12px; color: var(--muted); }
+#update-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
 #toast {
   position: fixed;
   bottom: 44px;
@@ -726,8 +968,8 @@ select {
 
 /* barra di scorrimento */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: #33333f; border-radius: 5px; }
-::-webkit-scrollbar-thumb:hover { background: #3d3d4c; }
+::-webkit-scrollbar-thumb { background: var(--sb-thumb); border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: var(--sb-thumb-hover); }
 ::-webkit-scrollbar-track { background: transparent; }
 
 /* ---------------------------------------------------------------- tab bar */
@@ -827,7 +1069,7 @@ select {
 }
 #sm-mem-text { font-size: 12px; font-variant-numeric: tabular-nums; }
 
-.sm-list { display: flex; flex-direction: column; gap: 3px; }
+.sm-list { display: flex; flex-direction: column; gap: 9px; overflow-y: auto; min-height: 0; }
 .sm-row {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr) 130px 64px auto;
@@ -881,11 +1123,29 @@ select {
 }
 
 /* ---------------------------------------------------------------- split a due pannelli (wavetable/sample) */
+/* Le due colonne (libreria PC e MicroFreak) scorrono in modo INDIPENDENTE:
+   la vista non scorre più come un blocco unico, così la libreria resta
+   visibile mentre si scorre l'elenco del device. */
+#content.tab-wavetables,
+#content.tab-samples {
+  overflow: hidden; /* lo scroll è dei singoli pannelli */
+  display: flex;
+  flex-direction: column;
+}
+#content.tab-wavetables #wavetable-view:not(.hidden),
+#content.tab-samples #samples-view:not(.hidden) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
 .pane-split {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 14px;
-  align-items: start;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
 }
 .pane {
   min-width: 0;
@@ -893,11 +1153,25 @@ select {
   border-radius: 8px;
   background: var(--panel);
   padding: 12px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 .pane-pc { border-color: var(--border); }
 .pane-dev { border-color: var(--accent2); }
-.pane .tab-header { margin-bottom: 10px; }
+.pane .tab-header { margin-bottom: 10px; flex: 0 0 auto; }
 .pane .tab-header h2 { font-size: 14px; }
+/* le liste scorrono ognuna per conto suo; il padding a destra tiene il box di
+   selezione staccato dalla barra di scorrimento (come nella lista preset) */
+.pane .pc-list,
+.pane .wt-list,
+.pane .sm-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 10px;
+}
 
 .pc-list { display: flex; flex-direction: column; gap: 4px; }
 .pc-item {
@@ -959,11 +1233,20 @@ select {
 .lib-item-row .li-meta { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 @media (max-width: 1200px) {
-  .pane-split { grid-template-columns: 1fr; }
+  /* pannelli impilati: si torna allo scroll unico della vista */
+  .pane-split { grid-template-columns: 1fr; flex: none; min-height: auto; }
+  #content.tab-wavetables,
+  #content.tab-samples { overflow-y: auto; display: block; }
+  #content.tab-wavetables #wavetable-view:not(.hidden),
+  #content.tab-samples #samples-view:not(.hidden) { display: block; }
+  .pane { min-height: auto; }
+  .pane .pc-list,
+  .pane .wt-list,
+  .pane .sm-list { overflow-y: visible; flex: none; min-height: auto; }
 }
 
 /* wavetable come lista verticale (speculare ai sample) */
-.wt-list { display: flex; flex-direction: column; gap: 3px; }
+.wt-list { display: flex; flex-direction: column; gap: 9px; overflow-y: auto; min-height: 0; }
 .wt-row {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr) 90px auto;
@@ -1006,20 +1289,22 @@ select {
 #wt-canvas {
   width: 100%;
   height: auto;
-  background: #12121a;
+  background: var(--render-bg);
   border-radius: 6px;
   display: block;
 }
-.wt-row.selected { background: var(--bg2); outline: 1px solid var(--sel); }
-.sm-row.selected { background: var(--bg2); outline: 1px solid var(--sel); }
-.pc-item.selected { outline: 1px solid var(--sel); }
+/* selezione: bordo INTERNO (border/box-shadow inset), mai "outline": l'outline
+   viene disegnato fuori dal box e il contenitore scrollabile lo taglia ai lati */
+.wt-row.selected { background: var(--bg2); border-color: var(--sel); }
+.sm-row.selected { background: var(--bg2); border-color: var(--sel); }
+.pc-item.selected { border-color: var(--sel); }
 
 /* render wavetable in piccolo (nel pannello dettagli) */
 .detail-render-box {
   margin-top: 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: #12121a;
+  background: var(--render-bg);
   padding: 8px;
 }
 .detail-render-box .render-head {
@@ -1064,13 +1349,13 @@ select {
 .detail-main { min-width: 0; }
 .detail-side { min-width: 0; }
 .detail-side .detail-render-box { margin-top: 0; }
-.lib-item-row.selected { background: var(--bg2); outline: 1px solid var(--sel); }
+.lib-item-row.selected { background: var(--bg2); box-shadow: inset 0 0 0 1px var(--sel); }
 
 /* evidenziazione riordino device (wavetable/sample) */
 .wt-row.drop-before,
-.sm-row.drop-before { box-shadow: inset 0 2px 0 var(--accent2); }
+.sm-row.drop-before { box-shadow: none; }
 .wt-row.drop-after,
-.sm-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent2); }
+.sm-row.drop-after { box-shadow: none; }
 .wt-row.swap-over,
 .sm-row.swap-over { outline: 2px solid var(--sel); outline-offset: -2px; background: var(--bg2); }
 

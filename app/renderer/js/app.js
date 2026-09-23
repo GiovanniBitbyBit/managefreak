@@ -99,10 +99,98 @@ const App = (() => {
     modalBody: $('modal-body'),
     modalCancel: $('modal-cancel'),
     modalOk: $('modal-ok'),
+    updateBackdrop: $('update-backdrop'),
+    updateTitle: $('update-title'),
+    updateBody: $('update-body'),
+    updateChangelog: $('update-changelog'),
+    updateProgress: $('update-progress'),
+    updateProgressFill: $('update-progress-fill'),
+    updateProgressText: $('update-progress-text'),
+    updateLater: $('update-later'),
+    updatePrimary: $('update-primary'),
+    appBrand: $('app-brand'),
+    appMenu: $('app-menu'),
+    appMenuVersion: $('app-menu-version'),
+    appMenuChangelog: $('app-menu-changelog'),
+    btnCheckUpdates: $('btn-check-updates'),
     toast: $('toast'),
   };
 
   // ------------------------------------------------------------------ utilità
+
+  let appVersion = ''; // versione dell'app (impostata in init)
+  let canAutoUpdate = true; // false su macOS/Linux e sulla build portable
+
+  // Indicatore di trascinamento: UNO solo, tracciato in una variabile. Prima si
+  // ripulivano tutte le righe a ogni movimento del mouse (con 1000+ preset era
+  // lentissimo e restavano barrette appese mostrandone due insieme).
+  const DRAG_INDICATOR_CLASSES = ['drop-before', 'drop-after', 'drop-left', 'drop-right', 'swap-over'];
+  let dragIndicatorEl = null;
+  function clearDragIndicator() {
+    if (!dragIndicatorEl) return;
+    dragIndicatorEl.classList.remove(...DRAG_INDICATOR_CLASSES);
+    dragIndicatorEl = null;
+  }
+  function setDragIndicator(el, cls) {
+    if (!el) return clearDragIndicator();
+    if (dragIndicatorEl === el && el.classList.contains(cls)) return; // già corretto
+    clearDragIndicator();
+    el.classList.add(cls);
+    dragIndicatorEl = el;
+  }
+
+  /** Card della libreria sotto il puntatore (o la più vicina se il punto è nel
+   *  gap), con l'indicazione se inserire prima o dopo. */
+  function libDropTargetFromPoint(clientX, clientY) {
+    const grid = el.libGrid;
+    if (!grid) return null;
+    const cards = Array.from(grid.querySelectorAll('.lib-card, .lib-row'));
+    if (!cards.length) return null;
+    let target = cards.find((c) => {
+      const r = c.getBoundingClientRect();
+      return clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom;
+    });
+    if (!target) {
+      let best = null; let bestD = Infinity;
+      for (const c of cards) {
+        const r = c.getBoundingClientRect();
+        const dx = Math.max(r.left - clientX, 0, clientX - r.right);
+        const dy = Math.max(r.top - clientY, 0, clientY - r.bottom);
+        const d = dx * dx + dy * dy;
+        if (d < bestD) { bestD = d; best = c; }
+      }
+      target = best;
+    }
+    if (!target) return null;
+    const r = target.getBoundingClientRect();
+    const listView = grid.classList.contains('lib-list-view');
+    const after = listView ? clientY >= r.top + r.height / 2 : clientX >= r.left + r.width / 2;
+    return { id: parseInt(target.dataset.id, 10), after };
+  }
+
+  /** Mostra la barretta di inserimento nella libreria (riordino interno e
+   *  import dal device), con la stessa normalizzazione: una posizione sola. */
+  function showLibInsertIndicator(clientX, clientY) {
+    const grid = el.libGrid;
+    const t = libDropTargetFromPoint(clientX, clientY);
+    if (!grid || !t) return clearDragIndicator();
+    const node = grid.querySelector(`[data-id="${t.id}"]`);
+    if (!node) return clearDragIndicator();
+    const listView = grid.classList.contains('lib-list-view');
+    const next = node.nextElementSibling;
+    const nextOk = next && next.classList.contains(listView ? 'lib-row' : 'lib-card');
+    if (listView) {
+      if (!t.after) setDragIndicator(node, 'drop-before');
+      else if (nextOk) setDragIndicator(next, 'drop-before');
+      else setDragIndicator(node, 'drop-after');
+      return;
+    }
+    if (!t.after) setDragIndicator(node, 'drop-left');
+    else if (nextOk) setDragIndicator(next, 'drop-left');
+    else setDragIndicator(node, 'drop-right');
+  }
+  let manualCheckPending = false; // true dopo un click esplicito su "Check for updates"
+  let updateReadyVersion = null; // versione scaricata e pronta da installare
 
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -227,24 +315,63 @@ const App = (() => {
     fill(el.midiOutput, '— MIDI output —');
   }
 
-  async function refreshPorts() {
+  // ------------------------------------------------------- sorveglianza porte MIDI
+  // Su Windows l'elenco delle porte Web MIDI può arrivare in ritardo (il backend
+  // WinRT enumera in modo asincrono) o restare vuoto per qualche secondo dopo un
+  // replug o un riavvio dell'app. Senza un secondo tentativo i menu restavano
+  // vuoti per sempre e sembrava che l'app avesse "perso" il MicroFreak.
+  const PORTS_RETRY_FAST_MS = 3000;
+  const PORTS_RETRY_FAST_TRIES = 20; // ~1 minuto di tentativi ravvicinati
+  const PORTS_RETRY_SLOW_MS = 20000; // poi un controllo ogni 20 s, a costo zero
+  let portsWatchTimer = null;
+  let portsWatchTries = 0;
+  let lastAutoConnectAt = 0;
+  let portsWereEmpty = true;
+
+  function stopPortWatch() {
+    if (portsWatchTimer) clearTimeout(portsWatchTimer);
+    portsWatchTimer = null;
+    portsWatchTries = 0;
+  }
+
+  function schedulePortWatch() {
+    if (portsWatchTimer) return;
+    const fast = portsWatchTries < PORTS_RETRY_FAST_TRIES;
+    const delay = fast ? PORTS_RETRY_FAST_MS : PORTS_RETRY_SLOW_MS;
+    portsWatchTimer = setTimeout(() => {
+      portsWatchTimer = null;
+      portsWatchTries++;
+      // nei tentativi ravvicinati si ricrea l'accesso MIDI (è quello che fa
+      // ripartire l'enumerazione); nel controllo lento basta rileggere la mappa,
+      // che Chromium aggiorna da sé: così non si accumulano oggetti MIDIAccess
+      refreshPorts({ quiet: true, rerequest: fast });
+    }, delay);
+  }
+
+  async function refreshPorts({ quiet = false, rerequest = true } = {}) {
     if (!Midi.supported()) {
-      toast('Web MIDI is not available in this environment.', 'err', 6000);
+      if (!quiet) toast('Web MIDI is not available in this environment.', 'err', 6000);
       fillEmptySelects();
       return;
     }
-    try {
-      await Midi.refresh();
-    } catch (e) {
-      toast('MIDI access denied: ' + (e.message || e), 'err', 6000);
-      fillEmptySelects();
-      return;
+    if (rerequest) {
+      try {
+        await Midi.refresh();
+      } catch (e) {
+        if (!quiet) toast('MIDI access denied: ' + (e.message || e), 'err', 6000);
+        fillEmptySelects();
+        schedulePortWatch();
+        return;
+      }
     }
     const inputs = Midi.inputs();
     const outputs = Midi.outputs();
 
     const fill = (select, ports, emptyLabel) => {
       const prev = select.value;
+      // gli id delle porte Web MIDI cambiano quando cambia l'insieme dei
+      // dispositivi: se l'id non c'è più si ritrova la porta per NOME
+      const prevName = (select.selectedOptions[0] || {}).textContent || '';
       select.innerHTML = '';
       const opt = document.createElement('option');
       opt.value = '';
@@ -258,7 +385,12 @@ const App = (() => {
         select.appendChild(o);
       }
       if (prev && Array.from(select.options).some((o) => o.value === prev)) select.value = prev;
-      else if (ports.length) select.value = ports[0].id;
+      else if (prevName) {
+        const byName = Array.from(select.options).find((o) => o.textContent === prevName);
+        if (byName) select.value = byName.value;
+      }
+      // niente default "prima porta": l'ordine delle porte MIDI cambia e la
+      // prima disponibile può essere una porta virtuale. Si sceglie dopo.
     };
 
     fill(el.midiInput, inputs, '— MIDI input —');
@@ -272,14 +404,58 @@ const App = (() => {
     };
     autoPick(el.midiInput, 'microfreak');
     autoPick(el.midiOutput, 'microfreak');
+    // NIENTE ripiego sulla "prima porta": se il MicroFreak non c'è, l'app
+    // finiva per collegarsi a una porta generica (SG Device I/O, StudioRack…)
+    // dando l'impressione di funzionare mentre il synth non riceveva nulla.
+    // Se manca, i menu restano vuoti e l'app continua a cercarlo.
+    const hasMicrofreak = inputs.some((p) => (p.name || '').toLowerCase().includes('microfreak'));
+    if (!inputs.length && !outputs.length) {
+      // nessuna porta: continua a provare in sottofondo invece di arrendersi
+      schedulePortWatch();
+      return;
+    }
+    if (!hasMicrofreak) {
+      const n = inputs.length + outputs.length;
+      if (!quiet) {
+        toast(`MicroFreak not found among the ${n} MIDI ports available. Unplug and replug its USB cable, or press "Refresh ports": ManageFreak keeps looking.`, 'err', 12000);
+        status(`MicroFreak not found (${n} other MIDI ports). Replug the USB cable — still searching…`);
+      }
+      schedulePortWatch();
+      return;
+    }
+    stopPortWatch();
+    if (portsWereEmpty) {
+      portsWereEmpty = false;
+      status(`MIDI ports found: ${inputs.length} input, ${outputs.length} output.`);
+    }
+    // se compare un MicroFreak e non siamo connessi, connetti: vale anche per le
+    // porte che si materializzano in ritardo, grazie al sorvegliante qui sopra
+    const inName = (el.midiInput.selectedOptions[0]?.textContent || '').toLowerCase();
+    const outName = (el.midiOutput.selectedOptions[0]?.textContent || '').toLowerCase();
+    if (!Midi.isOpen() && inName.includes('microfreak') && outName.includes('microfreak')
+        && Date.now() - lastAutoConnectAt > 30000) {
+      lastAutoConnectAt = Date.now();
+      setTimeout(connect, 300);
+    }
   }
 
   /** Sincronizza dal MicroFreak: firmware, 512 preset, 16 wavetable, 128 sample. */
+  let syncingNow = false; // evita due sincronizzazioni in parallelo sul device
+
   async function syncAllFromDevice() {
-    await detectFirmware();
-    await scanDevice();
-    await readWavetableInventory();
-    await readSampleInventory();
+    // Due sync contemporanee si intrecciano sullo stesso stream SysEx: le
+    // letture si incrociano (dati di un altro slot), la scansione non finisce
+    // mai e le porte vengono chiuse a metà operazione. Una alla volta.
+    if (syncingNow) return;
+    syncingNow = true;
+    try {
+      await detectFirmware();
+      await scanDevice();
+      await readWavetableInventory();
+      await readSampleInventory();
+    } finally {
+      syncingNow = false;
+    }
   }
 
   async function connect() {
@@ -288,6 +464,18 @@ const App = (() => {
     if (!inId || !outId) {
       toast('Select both a MIDI input and output.', 'err');
       return;
+    }
+    // già connessi alle stesse porte: NON riaprire. Midi.open() chiude prima le
+    // porte, e quella chiusura interrompeva le operazioni in corso (era la causa
+    // degli errori "MIDI ports not open" a metà scansione).
+    if (Midi.isOpen() && typeof Midi.currentIds === 'function') {
+      const cur = Midi.currentIds();
+      if (cur.input === inId && cur.output === outId) {
+        toast('Already connected — resynchronizing…', 'ok');
+        status('Synchronizing…');
+        syncAllFromDevice().catch((e) => toast('Sync failed: ' + (e && e.message || e), 'err', 6000));
+        return;
+      }
     }
     try {
       await Midi.open(inId, outId);
@@ -412,12 +600,17 @@ const App = (() => {
             data: entry.data,
           }, { timeoutMs: 4000 });
           const h = await MF.readHeader(slot, 4000);
-          if (h.empty || h.name !== entry.name) throw new Error('verifica header fallita');
-          state.device[slot - 1] = {
-            slot, name: entry.name,
-            category: typeof entry.category === 'number' && entry.category >= 0 ? entry.category : 0,
-            p1: entry.p1 || 0, empty: false,
-          };
+          if (h.empty || h.name !== entry.name) throw new Error('header verification failed');
+          // la cache degli header esiste solo dopo uno scan riuscito: se l'utente
+          // lancia l'upload appena connesso va aggiornata solo se c'è, altrimenti
+          // un TypeError interromperebbe il caricamento a metà
+          if (state.device) {
+            state.device[slot - 1] = {
+              slot, name: entry.name,
+              category: typeof entry.category === 'number' && entry.category >= 0 ? entry.category : 0,
+              p1: entry.p1 || 0, empty: false,
+            };
+          }
         } catch (e) {
           failed++;
           if (backup && backup.data) {
@@ -443,7 +636,7 @@ const App = (() => {
 
   async function scanDevice() {
     if (!Midi.isOpen()) {
-      toast('Connetti prima le porte MIDI.', 'err');
+      toast('Connect the MIDI ports first.', 'err');
       return;
     }
     setBusy(true, 'Scanning 512 presets…');
@@ -550,7 +743,7 @@ const App = (() => {
 
   async function writeToSlot(slot, entry, { selectAfter = true } = {}) {
     if (!Midi.isOpen()) {
-      toast('Connetti prima le porte MIDI.', 'err');
+      toast('Connect the MIDI ports first.', 'err');
       return false;
     }
     if (!entry.data || entry.data.length !== MF.DATALEN) {
@@ -793,6 +986,7 @@ const App = (() => {
       notes: null,
       actions: [
         { id: 'read', label: '⬅ Fetch library to PC', run: () => readDeviceSelectionToLibrary() },
+        { id: 'volume', label: '🔊 Set volume…', run: () => setVolumeOnDeviceSelection() },
       ],
       params: [],
     });
@@ -819,6 +1013,158 @@ const App = (() => {
     }
     setBusy(false);
     toast(`Added ${added} presets to the library ✓`, 'ok');
+  }
+
+  /**
+   * Cambia il volume delle patch selezionate SUL dispositivo (una o più slot,
+   * es. dalla selezione multipla o dal dettaglio di una singola patch). Prima
+   * legge i corpi (per il riepilogo con i volumi attuali), poi chiede il nuovo
+   * volume in dB, poi scrive ogni patch modificata e verifica il readback.
+   */
+  async function setVolumeOnDeviceSelection(slotsArg) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    if (!state.device) return toast('Scan the preset names first.', 'err');
+    // anche i preset Init hanno un corpo (il template del firmware) e il loro
+    // volume può essere modificato come quello degli altri
+    const slots = (slotsArg || deviceSelIds()).filter((s) => {
+      const h = state.device && state.device[s - 1];
+      return h && !h.empty && !h.error;
+    });
+    if (!slots.length) return toast('No occupied presets among the selected slots.', 'err');
+
+    // fase 1: legge i corpi per costruire il riepilogo (nome, categoria, volume)
+    setBusy(true, `Reading ${slots.length} presets…`);
+    el.btnCancel.classList.remove('hidden');
+    state.cancelRequested = false;
+    const read = [];
+    let readErrors = 0;
+    let cancelled = false;
+    try {
+      for (let i = 0; i < slots.length; i++) {
+        if (state.cancelRequested) {
+          cancelled = true;
+          break;
+        }
+        const slot = slots[i];
+        setProgress(i / slots.length, `Slot ${slot} — reading…`);
+        try {
+          const preset = await MF.readPreset(slot, { timeoutMs: 4000 });
+          read.push({ slot, preset });
+        } catch (e) {
+          readErrors++;
+          // il motivo va mostrato: prima veniva inghiottito senza traccia
+          status(`Slot ${slot}: ${(e && e.message) || e}`);
+        }
+      }
+    } finally {
+      // qualunque strada prenda la funzione, la UI non deve restare occupata
+      setProgress(null);
+      setBusy(false);
+      el.btnCancel.classList.add('hidden');
+    }
+    if (cancelled) return toast('Cancelled.', 'err');
+    if (!read.length) {
+      return toast(readErrors ? 'Could not read any of the selected presets.' : 'No presets could be read.', 'err');
+    }
+
+    // I preset Init contengono il template del firmware, che NON è nel formato
+    // "taggato" (nessun campo con nome): per loro non esiste un campo Volume da
+    // modificare. Va detto in modo esplicito, non saltato in silenzio.
+    const isEditable = (data) => !!(data && Params.parseStructured(data).fields.length);
+
+    const rows = read.map(({ slot, preset }) => {
+      const curRaw = Params.getFieldValue(preset.data, Params.VOLUME_KEY);
+      const cat = entryCategoryChip(preset);
+      return {
+        slot,
+        preset,
+        name: preset.name,
+        category: cat.label,
+        color: cat.color,
+        volume: curRaw === null ? null : Params.volumeDbLabel(Params.volumeRawToDb(curRaw)),
+        locked: curRaw === null && !isEditable(preset.data),
+      };
+    });
+
+    const locked = rows.filter((r) => r.locked).length;
+    if (locked === rows.length) {
+      return toast(rows.length === 1
+        ? 'This slot contains the firmware Init template: it has no named parameters, so its volume cannot be changed.'
+        : `All ${rows.length} selected presets contain the firmware Init template: they have no named parameters, so their volume cannot be changed.`,
+      'err', 8000);
+    }
+
+    const noteParts = [];
+    if (readErrors) noteParts.push(`${readErrors} slot${readErrors === 1 ? '' : 's'} could not be read and was skipped.`);
+    if (locked) {
+      noteParts.push(`${locked} Init preset${locked === 1 ? '' : 's'} contain${locked === 1 ? 's' : ''} the firmware Init template, which has no named parameters: ${locked === 1 ? 'its' : 'their'} volume cannot be changed and ${locked === 1 ? 'it' : 'they'} will be left untouched.`);
+    }
+
+    const dbVal = await promptVolume(
+      slots.length === 1 ? `Set volume — slot ${slots[0]}` : `Set volume — ${slots.length} slots`,
+      {
+        targetLabel: rows.length === 1
+          ? 'this preset on the MicroFreak'
+          : `${rows.length} preset${rows.length === 1 ? '' : 's'} on the MicroFreak`,
+        rows,
+        note: noteParts.length ? noteParts.join(' ') : null,
+      }
+    );
+    if (dbVal === null) return;
+    const raw = Params.volumeDbToRaw(dbVal);
+    const targetLabel = Params.volumeDbLabel(dbVal);
+
+    // fase 2: applica (riusa i corpi già letti) con verifica readback
+    setBusy(true, `Setting volume to ${targetLabel} on ${rows.length} presets…`);
+    el.btnCancel.classList.remove('hidden');
+    state.cancelRequested = false;
+    let done = 0;
+    let skipped = 0;
+    let failed = 0;
+    try {
+      for (let i = 0; i < rows.length; i++) {
+        if (state.cancelRequested) {
+          toast('Cancelled.', 'err');
+          break;
+        }
+        const { slot, preset } = rows[i];
+        const curRaw = Params.getFieldValue(preset.data, Params.VOLUME_KEY);
+        if (curRaw === null) { skipped++; continue; }
+        const curLabel = Params.volumeDbLabel(Params.volumeRawToDb(curRaw));
+        const newData = Params.setFieldValue(preset.data, Params.VOLUME_KEY, raw);
+        setProgress((i + 0.5) / rows.length, `Slot ${slot}: ${curLabel} → ${targetLabel}…`);
+        try {
+          await MF.writePreset(slot, {
+            name: preset.name,
+            category: preset.category,
+            p1: preset.p1,
+            data: newData,
+          }, { timeoutMs: 4000 });
+          // verifica readback
+          const rb = await MF.readPreset(slot, { timeoutMs: 4000 });
+          let okRb = !!(rb.data && rb.data.length === MF.DATALEN);
+          if (okRb) {
+            for (let b = 0; b < rb.data.length; b++) {
+              if (rb.data[b] !== newData[b]) { okRb = false; break; }
+            }
+          }
+          if (!okRb) throw new Error('readback does not match');
+          if (state.device && state.device[slot - 1]) state.device[slot - 1] = rb;
+          done++;
+        } catch (e) {
+          failed++;
+          status(`Slot ${slot}: ${e.message || e}`);
+        }
+      }
+      renderDevice();
+      const skipNote = skipped ? ` (${skipped} skipped: Init template, no Volume field)` : '';
+      const failNote = failed ? `, ${failed} failed` : '';
+      toast(`Volume set to ${targetLabel} on ${done} preset${done === 1 ? '' : 's'} on the MicroFreak${skipNote}${failNote} ✓`, 'ok', 7000);
+    } finally {
+      setBusy(false);
+      setProgress(null);
+      el.btnCancel.classList.add('hidden');
+    }
   }
 
   /** Moves one or more presets to another position, shifting the others,
@@ -1323,21 +1669,14 @@ const App = (() => {
       if (!e.dataTransfer.types.includes('application/x-managefreak')) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
-      const rect = card.getBoundingClientRect();
-      const before = isList()
-        ? e.clientY < rect.top + rect.height / 2
-        : e.clientX < rect.left + rect.width / 2;
-      card.classList.toggle('drop-before', before && isList());
-      card.classList.toggle('drop-after', !before && isList());
-      card.classList.toggle('drop-left', before && !isList());
-      card.classList.toggle('drop-right', !before && !isList());
+      // barretta di inserimento: stessa funzione usata dal drop sulla griglia,
+      // così card e gap indicano sempre la stessa identica posizione
+      showLibInsertIndicator(e.clientX, e.clientY);
     });
-    card.addEventListener('dragleave', () => {
-      card.classList.remove('drop-before', 'drop-after', 'drop-left', 'drop-right');
-    });
+    card.addEventListener('dragleave', () => { /* l'indicatore lo gestisce setDragIndicator */ });
     card.addEventListener('drop', (e) => {
       e.preventDefault();
-      card.classList.remove('drop-before', 'drop-after', 'drop-left', 'drop-right');
+      clearDragIndicator();
       const srcId = parseInt(e.dataTransfer.getData('application/x-managefreak'), 10);
       if (!srcId || srcId === id) return;
       const rect = card.getBoundingClientRect();
@@ -1583,12 +1922,134 @@ const App = (() => {
       actions: [
         { id: 'move', label: '⇥ Move to…', run: () => runBatchAction('move') },
         { id: 'fav', label: '★ Favorites', run: () => runBatchAction('fav') },
+        { id: 'volume', label: '🔊 Set volume…', run: () => setVolumeOnLibrarySelection() },
         { id: 'export', label: '⭳ Export .mfp', run: () => runBatchAction('export') },
         { id: 'delete', label: 'Delete', run: () => runBatchAction('delete') },
         { id: 'clear', label: 'Deselect', run: () => runBatchAction('clear') },
       ],
       params: [],
     });
+  }
+
+  // ------------------------------------------------------------------ volume in batch
+
+  /** Etichetta e colore della categoria di una voce di libreria o di un preset. */
+  function entryCategoryChip(e) {
+    const catIdx = typeof e.category === 'number' && e.category >= 0 ? e.category : -1;
+    if (catIdx >= 0) return { label: catName(catIdx) || '—', color: catColor(catIdx) };
+    if (e.category && String(e.category).startsWith('custom:')) {
+      const c = Library.allCategories().find((x) => x.id === parseInt(String(e.category).split(':')[1], 10));
+      if (c) return { label: c.name, color: c.color || catColor(0) };
+    }
+    return { label: '—', color: null };
+  }
+
+  /**
+   * Modale "Set volume": riepilogo delle patch selezionate in stile vista a
+   * lista (nome, tipo, volume attuale) + scelta del nuovo volume in dB
+   * (−12 … +12, come sul MicroFreak). rows: [{name, category, color, volume|null}].
+   */
+  function promptVolume(title, { targetLabel, rows = [], note = null } = {}) {
+    const db = (v) => Params.volumeDbLabel(v);
+    const rowsHtml = rows.length
+      ? `<div class="vol-summary">
+           <div class="vol-summary-header"><span>Name</span><span>Type</span><span>Volume</span></div>
+           <div class="vol-summary-body">
+             ${rows.map((r) => `<div class="vol-summary-item">
+               <span class="vsi-name" title="${esc(r.name)}">${esc(r.name)}</span>
+               <span class="vsi-cat">${r.category && r.category !== '—'
+                 ? `<span class="chip" style="border-color:${r.color || 'var(--border)'}">${esc(r.category)}</span>`
+                 : '<span class="vsi-none">—</span>'}</span>
+               <span class="vsi-vol">${r.locked
+                 ? '<span class="vsi-locked">Init — not editable</span>'
+                 : (r.volume === null ? '—' : esc(r.volume))}</span>
+             </div>`).join('')}
+           </div>
+         </div>`
+      : '';
+    const missing = rows.filter((r) => r.volume === null && !r.locked).length;
+    const foot = [
+      note,
+      missing ? `${missing} preset${missing === 1 ? '' : 's'} without a Volume field will be skipped` : null,
+    ].filter(Boolean).join(' ');
+
+    const p = showModal(
+      title,
+      `<p>Choose the new <strong>Volume</strong> for ${targetLabel}: the patch
+        parameter shown on the MicroFreak, from <strong>−12&nbsp;dB</strong> to
+        <strong>+12&nbsp;dB</strong> (0&nbsp;dB is neutral).</p>
+       ${rowsHtml}
+       ${foot ? `<p class="vol-note">${esc(foot)}</p>` : ''}
+       <div class="field">
+         <label for="v-db">NEW VOLUME</label>
+         <div class="vol-picker">
+           <span class="vol-min">−12 dB</span>
+           <input type="range" id="v-db" min="-12" max="12" step="1" value="0" />
+           <span class="vol-max">+12 dB</span>
+         </div>
+         <div id="v-db-label" class="vol-value">0 dB</div>
+       </div>`,
+      { okLabel: 'Apply' }
+    );
+    const range = $('v-db');
+    const label = $('v-db-label');
+    if (range && label) {
+      const update = () => {
+        const v = Number(range.value);
+        label.textContent = db(v);
+        label.classList.toggle('vol-zero', v === 0);
+        // il pulsante resta "Apply": il valore è già mostrato grande qui sopra
+        el.modalOk.textContent = 'Apply';
+      };
+      range.addEventListener('input', update);
+      update();
+      range.focus();
+    }
+    return p.then((ok) => (ok ? Number(range ? range.value : 0) : null));
+  }
+
+  /** Cambia il volume (in dB) di un gruppo di voci di libreria. Ritorna true se applicato. */
+  async function applyVolumeToLibraryEntries(entries) {
+    const rows = entries.map((e) => {
+      const curRaw = Params.getFieldValue(e.data, Params.VOLUME_KEY);
+      const cat = entryCategoryChip(e);
+      return {
+        id: e.id,
+        name: e.name,
+        category: cat.label,
+        color: cat.color,
+        volume: curRaw === null ? null : Params.volumeDbLabel(Params.volumeRawToDb(curRaw)),
+      };
+    });
+    const dbVal = await promptVolume(`Set volume — ${entries.length} preset${entries.length === 1 ? '' : 's'}`, {
+      targetLabel: entries.length === 1
+        ? 'this preset in the PC library'
+        : `${entries.length} selected preset${entries.length === 1 ? '' : 's'} in the PC library`,
+      rows,
+    });
+    if (dbVal === null) return false;
+    const raw = Params.volumeDbToRaw(dbVal);
+    let done = 0;
+    let skipped = 0;
+    for (const r of rows) {
+      if (r.volume === null) { skipped++; continue; }
+      const e = entries.find((x) => x.id === r.id);
+      if (!e) continue;
+      const newData = Params.setFieldValue(e.data, Params.VOLUME_KEY, raw);
+      Library.update(e.id, { dataB64: Mfp.bytesToB64(newData) });
+      done++;
+    }
+    const note = skipped ? ` (${skipped} skipped, no Volume field)` : '';
+    toast(`Volume set to ${Params.volumeDbLabel(dbVal)} on ${done} preset${done === 1 ? '' : 's'} in the library${note}. Send them to the MicroFreak to apply.`, 'ok', 7000);
+    return true;
+  }
+
+  /** Cambia il volume delle copie in libreria dei preset selezionati. */
+  async function setVolumeOnLibrarySelection() {
+    const ids = selIds();
+    const entries = ids.map((id) => Library.get(id)).filter((e) => e && e.data);
+    if (!entries.length) return toast('No presets with a body among the selection.', 'err');
+    await applyVolumeToLibraryEntries(entries);
   }
 
   function renderLibrary() {
@@ -1801,41 +2262,86 @@ const App = (() => {
     el.detailName.innerHTML = '';
     el.detailName.appendChild(document.createTextNode(name));
     if (onRename) {
-      const btn = document.createElement('button');
-      btn.className = 'btn small name-edit-btn';
-      btn.textContent = '✎';
-      btn.title = 'Rename';
-      btn.addEventListener('click', () => {
+      // Editor inline del nome. Entrando in modifica il nome e il pulsante ✎
+      // vengono sostituiti dall'input: all'uscita vanno quindi SEMPRE
+      // ricostruiti entrambi, anche quando si annulla o si clicca fuori.
+      let editing = false;
+      const showName = (shownName) => {
+        editing = false;
+        el.detailName.innerHTML = '';
+        el.detailName.appendChild(document.createTextNode(shownName));
+        const wrap = document.createElement('span');
+        wrap.className = 'name-edit-wrap';
+        const btn = document.createElement('button');
+        btn.className = 'btn small name-edit-btn';
+        btn.textContent = '✎';
+        btn.title = 'Rename';
+        btn.addEventListener('click', () => startEdit(shownName));
+        wrap.appendChild(btn);
+        el.detailName.appendChild(wrap);
+      };
+      const startEdit = (currentName, initialValue) => {
+        if (editing) return;
+        editing = true;
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'name-edit-input';
         input.maxLength = 14;
-        input.value = name;
+        input.value = initialValue !== undefined ? initialValue : currentName;
         el.detailName.innerHTML = '';
         el.detailName.appendChild(input);
         input.focus();
         input.select();
         let done = false;
-        const finish = (save) => {
-          if (done) return; // evita il doppio invio (Enter + blur dopo il re-render)
+        const finish = async (save, askFirst = false) => {
+          if (done) return; // Enter + click fuori: una sola conclusione
           done = true;
-          if (save && input.value.trim() && input.value.trim() !== name) {
-            onRename(input.value.trim());
-          } else {
-            el.detailName.innerHTML = '';
-            el.detailName.appendChild(document.createTextNode(name));
+          document.removeEventListener('pointerdown', onOutside, true);
+          const value = input.value.trim();
+          if (!save || !value || value === currentName) {
+            showName(currentName); // annullato o invariato
+            return;
+          }
+          if (askFirst) {
+            // clic fuori dal campo: chiedi conferma prima di rinominare
+            const yes = await showModal('Confirm the name change?',
+              `<p>Rename <strong>${esc(currentName)}</strong> to <strong>${esc(value)}</strong>?</p>`,
+              { okLabel: 'Rename' });
+            if (!yes) { showName(currentName); return; }
+          }
+          showName(value);
+          let applied = true;
+          try {
+            const res = await Promise.resolve(onRename(value));
+            applied = res !== false;
+            // se il chiamante restituisce il nome REALMENTE salvato sul device
+            // (es. troncato a 12/14 caratteri) è quello che va mostrato
+            if (applied && typeof res === 'string' && res && res !== value) showName(res);
+          } catch (e) {
+            applied = false;
+            toast('Rename failed: ' + (e && e.message || e), 'err', 5000);
+          }
+          // se la scrittura non è riuscita la UI non deve mentire: torna il nome
+          // reale e riapre il campo col testo digitato, pronto per riprovare
+          if (!applied) {
+            showName(currentName);
+            startEdit(currentName, value);
           }
         };
+        // clic fuori dal campo = conferma (con richiesta esplicita). In fase di
+        // capture, così parte PRIMA che il clic ridisegni il pannello
+        // distruggendo l'input (era il motivo per cui il testo andava perso).
+        const onOutside = (ev) => {
+          if (ev.target !== input) finish(true, true);
+        };
+        document.addEventListener('pointerdown', onOutside, true);
         input.addEventListener('keydown', (ev) => {
-          if (ev.key === 'Enter') finish(true);
-          else if (ev.key === 'Escape') finish(false);
+          if (ev.key === 'Enter') { ev.preventDefault(); finish(true, false); }
+          else if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
         });
-        input.addEventListener('blur', () => finish(true));
-      });
-      const wrap = document.createElement('span');
-      wrap.className = 'name-edit-wrap';
-      wrap.appendChild(btn);
-      el.detailName.appendChild(wrap);
+        input.addEventListener('blur', () => finish(true, false));
+      };
+      showName(name);
     }
     el.detailMeta.innerHTML = metaRows.map(([k, v]) =>
       `<div><strong>${esc(k)}:</strong> ${esc(v)}</div>`).join('');
@@ -1863,9 +2369,14 @@ const App = (() => {
       };
     }
     el.detailNotesBox.classList.add('hidden'); // campo note rimosso
-    el.detailActions.innerHTML = actions.map((a) =>
+    // i pulsanti possono stare nella riga standard oppure accanto alle stelle
+    // (contenitore #detail-actions-row fornito dal chiamante)
+    const inlineActions = document.getElementById('detail-actions-row');
+    const actionsHost = inlineActions || el.detailActions;
+    actionsHost.innerHTML = actions.map((a) =>
       `<button class="btn small" data-action="${a.id}">${esc(a.label)}</button>`).join('');
-    el.detailActions.querySelectorAll('button').forEach((b) => {
+    if (inlineActions) el.detailActions.innerHTML = '';
+    actionsHost.querySelectorAll('button').forEach((b) => {
       b.addEventListener('click', () => actions.find((a) => a.id === b.dataset.action).run());
     });
     el.detailParams.innerHTML = params.length
@@ -1889,6 +2400,7 @@ const App = (() => {
       actions: [
         { id: 'play', label: '▶ Select on synth', run: () => MF.selectPreset(slot) },
         ...(h.empty || h.error ? [] : [{ id: 'read', label: '⬅ Import to library', run: () => readSlotToLibrary(slot) }]),
+        ...(h.empty || h.error ? [] : [{ id: 'volume', label: '🔊 Set volume…', run: () => setVolumeOnDeviceSelection([slot]) }]),
         ...(h.empty || h.error ? [] : [{ id: 'init', label: 'Delete (Init)', run: () => initDeviceSlots([slot]) }]),
       ],
       params: [],
@@ -1901,8 +2413,10 @@ const App = (() => {
             renderDevice();
           }
           toast(`Renamed slot ${slot} to "${updated.name}" ✓`, 'ok');
+          return updated.name; // il nome reale salvato sul device
         } catch (e) {
           toast('Rename failed: ' + (e.message || e), 'err', 5000);
+          return false;
         } finally {
           setBusy(false);
         }
@@ -1944,9 +2458,12 @@ const App = (() => {
         <label for="detail-cat-sel">Category</label>
         <select id="detail-cat-sel">${catOpts}</select>
       </div>
-      <div class="detail-coll">
+      <div class="detail-coll detail-coll-rating">
         <label>Rating</label>
-        <div id="detail-rating">${ratingStarsHtml(entry.rating || 0, { interactive: true, id })}</div>
+        <div class="rating-actions">
+          <div id="detail-rating">${ratingStarsHtml(entry.rating || 0, { interactive: true, id })}</div>
+          <div id="detail-actions-row" class="detail-actions inline"></div>
+        </div>
       </div>
       <div class="detail-coll">
         <label>Characteristics</label>
@@ -1964,6 +2481,11 @@ const App = (() => {
       actions: [
         { id: 'export', label: '⭳ Export .mfp', run: () => exportEntry(entry) },
         { id: 'exportz', label: '⭳ Export .mfpz', run: () => exportEntry(entry, true) },
+        { id: 'volume', label: '🔊 Set volume…', run: async () => {
+          if (!entry.data) return toast('This preset has no body.', 'err');
+          const changed = await applyVolumeToLibraryEntries([entry]);
+          if (changed) showLibraryDetail(id); // aggiorna il parametro Volume (dB)
+        } },
         { id: 'delete', label: 'Delete', run: () => { Library.remove(id); showDetailEmpty(); renderLibrary(); } },
       ],
       params,
@@ -2205,17 +2727,32 @@ const App = (() => {
   }
 
   async function backupLibrary() {
+    const entries = Library.all();
+    const collections = Library.allCollections();
     const stateCopy = JSON.stringify({
       version: 2,
-      entries: Library.all(),
+      entries,
       customCategories: Library.allCategories(),
-      collections: Library.allCollections(),
+      collections,
     }, null, 1);
-    await window.mfapi.saveFile({
-      defaultName: `managefreak-backup-${new Date().toISOString().slice(0, 10)}.json`,
-      data: btoa(unescape(encodeURIComponent(stateCopy))),
-      filters: [{ name: 'ManageFreak backup (JSON)', extensions: ['json'] }],
-    });
+    let savedPath = null;
+    try {
+      savedPath = await window.mfapi.saveFile({
+        defaultName: `managefreak-backup-${new Date().toISOString().slice(0, 10)}.json`,
+        data: btoa(unescape(encodeURIComponent(stateCopy))),
+        filters: [{ name: 'ManageFreak backup (JSON)', extensions: ['json'] }],
+      });
+    } catch (e) {
+      toast('Library backup failed: ' + (e && e.message || e), 'err', 6000);
+      return;
+    }
+    if (!savedPath) return; // annullato nella finestra di salvataggio
+    const file = String(savedPath).split(/[\\/]/).pop();
+    const kb = Math.max(1, Math.round(new TextEncoder().encode(stateCopy).length / 1024));
+    const sizeTxt = kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`;
+    toast(`Library backed up ✓ — ${entries.length} preset${entries.length === 1 ? '' : 's'}`
+      + `${collections.length ? `, ${collections.length} librar${collections.length === 1 ? 'y' : 'ies'}` : ''}`
+      + ` → "${file}" (${sizeTxt})`, 'ok', 8000);
   }
 
   async function pickLibraryEntry() {
@@ -2343,13 +2880,16 @@ const App = (() => {
     for (const [t, id] of Object.entries(views)) {
       $('' + id).classList.toggle('hidden', t !== tab);
     }
-    // sidebar contestuale: presets/device → librerie preset; wavetable/sample → librerie dedicate
+    // sidebar contestuale: presets → librerie preset; wavetable/sample → librerie
+    // dedicate; device → SOLO backup/ripristino completo (categorie, caratteristiche
+    // e librerie non servono nella schermata del dispositivo)
     const libTarget = tab === 'wavetables' ? 'sidebar-wavetables' : tab === 'samples' ? 'sidebar-samples' : 'sidebar-library';
+    const mostraLibrerie = tab !== 'device';
     for (const id of ['sidebar-library', 'sidebar-wavetables', 'sidebar-samples']) {
-      $('' + id).classList.toggle('hidden', id !== libTarget);
+      $('' + id).classList.toggle('hidden', !mostraLibrerie || id !== libTarget);
     }
-    // il backup completo del dispositivo è visibile solo nella scheda Presets
-    $('sidebar-backup').classList.toggle('hidden', tab !== 'presets');
+    // il backup completo del dispositivo si trova nelle schede Presets e Device
+    $('sidebar-backup').classList.toggle('hidden', tab !== 'presets' && tab !== 'device');
     if (tab === 'wavetables') {
       renderWavetableSidebar();
       renderWavetablePc();
@@ -2362,7 +2902,10 @@ const App = (() => {
       showDetailEmpty();
       if (!state.samples && Midi.isOpen()) readSampleInventory();
     }
-    if (tab === 'device' && !state.deviceGlobals && Midi.isOpen()) loadDeviceGlobals();
+    // la scheda Device rilegge sempre i valori dal synth: un ripristino (o un
+    // reset sul synth) può averli cambiati fuori dall'app, e mostrare i valori
+    // vecchi faceva sembrare che il ripristino non avesse funzionato
+    if (tab === 'device' && Midi.isOpen()) loadDeviceGlobals({ quiet: true });
     if (tab === 'presets') {
       const ids = selIds();
       if (ids.length === 1) showLibraryDetail(ids[0]);
@@ -2412,9 +2955,9 @@ const App = (() => {
         <span class="wt-name">${empty ? '(empty)' : esc(h.name)}</span>
         <span class="wt-meta">${empty ? '' : '16 KB'}</span>
         <span class="wt-actions">
+          <button class="btn small" data-wt="up" title="Substitute WAV / .mfw / .mfwz">↻</button>
           ${empty ? '' : `<button class="btn small" data-wt="dl" title="Download .mfw">⭳</button>
           <button class="btn small" data-wt="clear" title="Clear slot">✕</button>`}
-          <button class="btn small" data-wt="up" title="Upload WAV / .mfw / .mfwz">➡</button>
         </span>
       </div>`;
     }).join('');
@@ -2453,7 +2996,7 @@ const App = (() => {
     // device (swap al centro della riga, shift sui bordi)
     const clearWtHighlights = () => {
       listEl.querySelectorAll('.wt-row').forEach((r) =>
-        r.classList.remove('swap-over', 'drop-before', 'drop-after'));
+        r.classList.remove('swap-over', 'write-over', 'drop-before', 'drop-after'));
     };
     const resolveWtDrop = (clientY) => {
       const rows = Array.from(listEl.querySelectorAll('.wt-row'));
@@ -2487,7 +3030,11 @@ const App = (() => {
       const idStr = e.dataTransfer.getData('application/x-managefreak-wt');
       if (idStr) {
         const entry = state.wtLib.find((x) => x.id === idStr);
-        if (entry) uploadWavetableEntryToSlot(entry, target.slot);
+        if (!entry) return;
+        // conferma sempre, identica ai preset
+        const ok = await confirmSlotWrite({ name: entry.name, slot: target.slot });
+        if (!ok) return;
+        await uploadWavetableEntryToSlot(entry, target.slot);
         return;
       }
       const block = e.dataTransfer.getData('application/x-managefreak-wt-block');
@@ -2508,14 +3055,24 @@ const App = (() => {
       if (!wtDragTypes.some((t) => e.dataTransfer.types.includes(t))) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
-      clearWtHighlights();
       const target = resolveWtDrop(e.clientY);
       if (!target) return;
-      const row = listEl.querySelector(`.wt-row[data-slot="${target.slot}"]`);
+      // Wavetable trascinata dalla LIBRERIA: sostituisce lo slot sotto il
+      // puntatore → nessuna barretta, solo l'evidenziazione dello slot
+      if (e.dataTransfer.types.includes('application/x-managefreak-wt')) {
+        const row = listEl.querySelector(`.wt-row[data-slot="${target.slot}"]`);
+        if (row) setDragIndicator(row, 'swap-over');
+        return;
+      }
+      // stesso punto di inserimento → stessa indicazione (vedi nota nei sample)
+      const rows = Array.from(listEl.querySelectorAll('.wt-row'));
+      const idx = rows.findIndex((r) => parseInt(r.dataset.slot, 10) === target.slot);
+      const ind = (target.mode === 'before' && idx > 0)
+        ? { slot: parseInt(rows[idx - 1].dataset.slot, 10), mode: 'after' }
+        : target;
+      const row = listEl.querySelector(`.wt-row[data-slot="${ind.slot}"]`);
       if (row) {
-        if (target.mode === 'onto') row.classList.add('swap-over');
-        else if (target.mode === 'before') row.classList.add('drop-before');
-        else row.classList.add('drop-after');
+        setDragIndicator(row, ind.mode === 'onto' ? 'swap-over' : ind.mode === 'before' ? 'drop-before' : 'drop-after');
       }
     });
     listEl.addEventListener('dragleave', (e) => {
@@ -2600,8 +3157,8 @@ const App = (() => {
     } catch (e) {
       return toast('Import failed: ' + (e.message || e), 'err', 6000);
     }
-    setBusy(true, `Uploading wavetable to slot ${target}…`);
-    setProgress(0, 'Uploading wavetable…');
+    setBusy(true, `Substituting wavetable in slot ${target}…`);
+    setProgress(0, 'Substituting wavetable…');
     try {
       await MF.writeWavetable(target, { name: wt.name || 'Wavetable', data: wt.data }, {
         onProgress: (frac, label) => setProgress(frac, label),
@@ -2612,7 +3169,7 @@ const App = (() => {
       if (state.wtLastRender && state.wtLastRender.slot === target) selectWavetable(target);
       toast(`Wavetable "${wt.name || 'Wavetable'}" written to slot ${target} ✓`, 'ok');
     } catch (e) {
-      toast('Wavetable upload failed: ' + (e.message || e), 'err', 6000);
+      toast('Wavetable substitution failed: ' + (e.message || e), 'err', 6000);
     } finally {
       setBusy(false);
       setProgress(null);
@@ -2712,9 +3269,9 @@ const App = (() => {
         <span class="sm-time">${empty ? '' : `${fmtMs(timeMs)} · ${(h.sizeBytes / 1024).toFixed(0)} KB`}</span>
         <span class="sm-cksum">${empty ? '' : '#' + h.checksum.toString(16).padStart(4, '0')}</span>
         <span class="sm-actions">
+          <button class="btn small" data-sm="up" title="Substitute WAV / .mfsample">↻</button>
           ${empty ? '' : `<button class="btn small" data-sm="dl" title="Download .mfsample">⭳</button>
           <button class="btn small" data-sm="clear" title="Clear slot">✕</button>`}
-          <button class="btn small" data-sm="up" title="Upload WAV / .mfsample">➡</button>
         </span>
       </div>`;
     }).join('');
@@ -2753,7 +3310,7 @@ const App = (() => {
     // device (swap al centro della riga, shift sui bordi)
     const clearSmHighlights = () => {
       list.querySelectorAll('.sm-row').forEach((r) =>
-        r.classList.remove('swap-over', 'drop-before', 'drop-after'));
+        r.classList.remove('swap-over', 'write-over', 'drop-before', 'drop-after'));
     };
     const resolveSmDrop = (clientY) => {
       const rows = Array.from(list.querySelectorAll('.sm-row'));
@@ -2787,7 +3344,11 @@ const App = (() => {
       const idStr = e.dataTransfer.getData('application/x-managefreak-sm');
       if (idStr) {
         const entry = state.smLib.find((x) => x.id === idStr);
-        if (entry) uploadSampleEntryToSlot(entry, target.slot);
+        if (!entry) return;
+        // conferma sempre, identica ai preset
+        const ok = await confirmSlotWrite({ name: entry.name, slot: target.slot });
+        if (!ok) return;
+        await uploadSampleEntryToSlot(entry, target.slot);
         return;
       }
       const block = e.dataTransfer.getData('application/x-managefreak-sm-block');
@@ -2808,14 +3369,25 @@ const App = (() => {
       if (!smDragTypes.some((t) => e.dataTransfer.types.includes(t))) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
-      clearSmHighlights();
       const target = resolveSmDrop(e.clientY);
       if (!target) return;
-      const row = list.querySelector(`.sm-row[data-slot="${target.slot}"]`);
+      // Sample trascinato dalla LIBRERIA: sostituisce lo slot sotto il puntatore
+      // → nessuna barretta, solo l'evidenziazione dello slot
+      if (e.dataTransfer.types.includes('application/x-managefreak-sm')) {
+        const row = list.querySelector(`.sm-row[data-slot="${target.slot}"]`);
+        if (row) setDragIndicator(row, 'swap-over');
+        return;
+      }
+      // stesso punto di inserimento → stessa indicazione: uso sempre "dopo la
+      // riga sopra", tranne in testa alla lista dove non c'è una riga sopra
+      const rows = Array.from(list.querySelectorAll('.sm-row'));
+      const idx = rows.findIndex((r) => parseInt(r.dataset.slot, 10) === target.slot);
+      const ind = (target.mode === 'before' && idx > 0)
+        ? { slot: parseInt(rows[idx - 1].dataset.slot, 10), mode: 'after' }
+        : target;
+      const row = list.querySelector(`.sm-row[data-slot="${ind.slot}"]`);
       if (row) {
-        if (target.mode === 'onto') row.classList.add('swap-over');
-        else if (target.mode === 'before') row.classList.add('drop-before');
-        else row.classList.add('drop-after');
+        setDragIndicator(row, ind.mode === 'onto' ? 'swap-over' : ind.mode === 'before' ? 'drop-before' : 'drop-after');
       }
     });
     list.addEventListener('dragleave', (e) => {
@@ -2911,8 +3483,8 @@ const App = (() => {
     } catch (e) {
       return toast('Import failed: ' + (e.message || e), 'err', 6000);
     }
-    setBusy(true, `Uploading sample to slot ${target}…`);
-    setProgress(0, 'Uploading sample…');
+    setBusy(true, `Substituting sample in slot ${target}…`);
+    setProgress(0, 'Substituting sample…');
     try {
       await MF.writeSample(target, name, data, {
         onProgress: (frac, label) => setProgress(frac, label),
@@ -2928,7 +3500,7 @@ const App = (() => {
       if (state.smLastRender && state.smLastRender.slot === target) selectSample(target);
       toast(`Sample "${name}" written to slot ${target} ✓`, 'ok');
     } catch (e) {
-      toast('Sample upload failed: ' + (e.message || e), 'err', 6000);
+      toast('Sample substitution failed: ' + (e.message || e), 'err', 6000);
     } finally {
       setBusy(false);
       setProgress(null);
@@ -3009,9 +3581,9 @@ const App = (() => {
     });
   }
 
-  async function loadDeviceGlobals() {
+  async function loadDeviceGlobals({ quiet = false } = {}) {
     if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
-    setBusy(true, 'Reading device settings…');
+    if (!quiet) setBusy(true, 'Reading device settings…');
     try {
       const codes = DEVICE_SETTINGS.map(([name]) => MF.GLOBAL_CODES[name]);
       const raw = await MF.readGlobalCodes(codes);
@@ -3019,11 +3591,11 @@ const App = (() => {
       DEVICE_SETTINGS.forEach(([name], i) => { values[name] = raw[codes[i]]; });
       state.deviceGlobals = values;
       renderDeviceView(values);
-      toast('Device settings loaded ✓', 'ok');
+      if (!quiet) toast('Device settings loaded ✓', 'ok');
     } catch (e) {
       toast('Device settings read failed: ' + (e.message || e), 'err', 6000);
     } finally {
-      setBusy(false);
+      if (!quiet) setBusy(false);
     }
   }
 
@@ -3078,13 +3650,24 @@ const App = (() => {
 
   // ---------------------------------------------------------------- render wavetable (vista Arturia)
 
+  /** Colori del canvas: il canvas non eredita le variabili CSS, quindi li scelgo
+   *  in base al tema. I valori del tema scuro restano quelli di sempre. */
+  function canvasColors() {
+    const light = document.documentElement.dataset.theme === 'light';
+    return light
+      // su fondo bianco i cicli in coda servono un po' piu' di opacita'
+      ? { text: '#6d6d7d', highlight: '#c9761f', ribbon: '70, 130, 200', alpha0: 0.38, alphaSpan: 0.55, wave: '#2ea867' }
+      : { text: '#8a8a9a', highlight: '#ffb454', ribbon: '96, 175, 235', alpha0: 0.22, alphaSpan: 0.62, wave: 'rgba(96, 210, 160, 0.9)' };
+  }
+
   function drawWavetable(canvas, data, highlightCycle) {
     const ctx = canvas.getContext('2d');
+    const C = canvasColors();
     const W = canvas.width;
     const H = canvas.height;
     ctx.clearRect(0, 0, W, H);
     if (!data || data.length < 512) {
-      ctx.fillStyle = '#8a8a9a';
+      ctx.fillStyle = C.text;
       ctx.font = '13px sans-serif';
       ctx.fillText(data ? 'No wavetable data' : 'Loading preview…', 12, 20);
       return;
@@ -3119,7 +3702,7 @@ const App = (() => {
         else ctx.lineTo(x, y);
       }
       const isHl = c === hc;
-      ctx.strokeStyle = isHl ? '#ffb454' : `rgba(96, 175, 235, ${0.22 + 0.62 * t})`;
+      ctx.strokeStyle = isHl ? C.highlight : `rgba(${C.ribbon}, ${C.alpha0 + C.alphaSpan * t})`;
       ctx.lineWidth = isHl ? 2.4 : 1.2;
       ctx.stroke();
     }
@@ -3127,11 +3710,12 @@ const App = (() => {
 
   function drawSampleWave(canvas, data) {
     const ctx = canvas.getContext('2d');
+    const C = canvasColors();
     const W = canvas.width;
     const H = canvas.height;
     ctx.clearRect(0, 0, W, H);
     if (!data || data.length < 4) {
-      ctx.fillStyle = '#8a8a9a';
+      ctx.fillStyle = C.text;
       ctx.font = '12px sans-serif';
       ctx.fillText(data ? 'No sample data' : 'Loading preview…', 12, 20);
       return;
@@ -3154,7 +3738,7 @@ const App = (() => {
       ctx.moveTo(x, y0);
       ctx.lineTo(x, y1);
     }
-    ctx.strokeStyle = 'rgba(96, 210, 160, 0.9)';
+    ctx.strokeStyle = C.wave;
     ctx.lineWidth = 1;
     ctx.stroke();
   }
@@ -3204,8 +3788,9 @@ const App = (() => {
         <canvas id="wt-detail-canvas" width="460" height="180"></canvas>
       </div>`,
       onRename: (newName) => {
-        if (slot) renameWavetableDetail(slot, newName);
-        else if (libId) renameWavetableLibEntry(libId, newName);
+        if (slot) return renameWavetableDetail(slot, newName);
+        if (libId) return renameWavetableLibEntry(libId, newName);
+        return true;
       },
     });
     const collSel = $('wt-detail-coll');
@@ -3271,8 +3856,9 @@ const App = (() => {
         <canvas id="sm-detail-wave" width="460" height="180"></canvas>
       </div>`,
       onRename: (newName) => {
-        if (slot) renameSampleDetail(slot, newName);
-        else if (libId) renameSampleLibEntry(libId, newName);
+        if (slot) return renameSampleDetail(slot, newName);
+        if (libId) return renameSampleLibEntry(libId, newName);
+        return true;
       },
     });
     const collSel = $('sm-detail-coll');
@@ -3434,8 +4020,10 @@ const App = (() => {
       renderWavetables();
       selectWavetable(slot);
       toast(`Wavetable renamed to "${newName}" ✓`, 'ok');
+      return (state.wavetables && state.wavetables[slot - 1] && state.wavetables[slot - 1].name) || true;
     } catch (e) {
       toast('Rename failed: ' + (e.message || e), 'err', 6000);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -3461,8 +4049,10 @@ const App = (() => {
       renderSamples();
       selectSample(slot);
       toast(`Sample renamed to "${newName}" ✓`, 'ok');
+      return (state.samples && state.samples[slot - 1] && state.samples[slot - 1].name) || true;
     } catch (e) {
       toast('Rename failed: ' + (e.message || e), 'err', 6000);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -3786,6 +4376,11 @@ const App = (() => {
       for (let s = 1; s <= MF.WAVE_SLOTS; s++) {
         if (state.wavetables) state.wavetables[s - 1] = await MF.readWavetableHeader(s);
       }
+      // i corpi si sono spostati di slot: senza invalidare la cache l'anteprima
+      // di uno slot riletto mostrerebbe ancora la forma d'onda precedente
+      if (state.wtData) {
+        for (const w of writes) { delete state.wtData[w.from]; delete state.wtData[w.to]; }
+      }
       state.wtSel.clear();
       state.wtSelAnchor = null;
       renderWavetables();
@@ -3841,6 +4436,10 @@ const App = (() => {
       });
       for (let s = 1; s <= MF.SAMPLE_SLOTS; s++) {
         if (state.samples) state.samples[s - 1] = await MF.readSampleHeader(s);
+      }
+      // stesso motivo dei wavetable: le voci di directory sono cambiate di posto
+      if (state.smData) {
+        for (const w of writes) { delete state.smData[w.from]; delete state.smData[w.to]; }
       }
       state.smSel.clear();
       state.smSelAnchor = null;
@@ -4090,8 +4689,8 @@ const App = (() => {
             <div class="pc-meta">${e.addedAt ? new Date(e.addedAt).toLocaleDateString() : ''}</div>
           </div>
           <span class="pc-actions">
-            <button class="btn small" data-act="dl" title="Download .mfw">⭳</button>
             <button class="btn small" data-act="send" title="Send to MicroFreak">➡</button>
+            <button class="btn small" data-act="dl" title="Download .mfw">⭳</button>
             <button class="btn small" data-act="del" title="Remove from PC library">✕</button>
           </span>
         </div>`).join('')
@@ -4135,8 +4734,8 @@ const App = (() => {
             <div class="pc-meta">${fmtMs(e.durationMs || 0)} · ${((e.dataB64 ? e.dataB64.length * 3 / 4 : 0) / 1024).toFixed(0)} KB</div>
           </div>
           <span class="pc-actions">
-            <button class="btn small" data-act="dl" title="Download .mfsample">⭳</button>
             <button class="btn small" data-act="send" title="Send to MicroFreak">➡</button>
+            <button class="btn small" data-act="dl" title="Download .mfsample">⭳</button>
             <button class="btn small" data-act="del" title="Remove from PC library">✕</button>
           </span>
         </div>`).join('')
@@ -4327,10 +4926,23 @@ const App = (() => {
     renderSamplePc();
   }
 
-  async function chooseSlotModal(title, max, firstFree) {
+  /**
+   * Modale di conferma per scrivere una wavetable/sample della libreria PC in
+   * uno slot del MicroFreak — identica a quella dei preset.
+   */
+  async function confirmSlotWrite({ name, slot }) {
+    return showModal(
+      `Confirm write to slot ${slot}`,
+      `<p>Write <strong>"${esc(name)}"</strong> to slot ${slot} on the MicroFreak?</p>`,
+      { okLabel: 'Send to MicroFreak' }
+    );
+  }
+
+  async function chooseSlotModal(title, max, firstFree, { headers = null } = {}) {
     const ok = await showModal(title,
       `<div class="field"><label>Slot (1–${max})</label>
-         <input id="m-slot" type="number" min="1" max="${max}" value="${firstFree || 1}" /></div>`,
+         <input id="m-slot" type="number" min="1" max="${max}" value="${firstFree || 1}" />
+         <div id="m-slot-info" class="vol-note"></div></div>`,
       {
         okLabel: 'Send',
         onOk: () => {
@@ -4342,6 +4954,28 @@ const App = (() => {
           $('m-slot').dataset.slot = String(v);
         },
       });
+    const input = $('m-slot');
+    const info = $('m-slot-info');
+    if (input && info && headers) {
+      const update = () => {
+        const v = parseInt(input.value, 10);
+        const h = v >= 1 && v <= max ? headers[v - 1] : null;
+        if (!v || v < 1 || v > max) {
+          info.textContent = '';
+          info.classList.remove('vol-warn');
+          return;
+        }
+        if (h && !h.empty) {
+          info.textContent = `⚠ Slot ${v} is occupied by "${h.name}": this will SUBSTITUTE it.`;
+          info.classList.add('vol-warn');
+        } else {
+          info.textContent = `Slot ${v} is empty.`;
+          info.classList.remove('vol-warn');
+        }
+      };
+      input.addEventListener('input', update);
+      update();
+    }
     if (!ok) return null;
     return parseInt($('m-slot').dataset.slot, 10);
   }
@@ -4351,14 +4985,14 @@ const App = (() => {
     const entry = state.wtLib.find((e) => e.id === id);
     if (!entry) return;
     const firstFree = (state.wavetables || []).findIndex((h) => !h || h.empty) + 1 || 1;
-    const slot = await chooseSlotModal('Send wavetable to MicroFreak', 16, firstFree);
+    const slot = await chooseSlotModal('Send wavetable to MicroFreak', 16, firstFree, { headers: state.wavetables });
     if (!slot) return;
     await uploadWavetableEntryToSlot(entry, slot);
   }
 
   async function uploadWavetableEntryToSlot(entry, slot) {
-    setBusy(true, `Uploading wavetable to slot ${slot}…`);
-    setProgress(0, 'Uploading wavetable…');
+    setBusy(true, `Substituting wavetable in slot ${slot}…`);
+    setProgress(0, 'Substituting wavetable…');
     try {
       await MF.writeWavetable(slot, { name: entry.name, data: Mfp.b64ToBytes(entry.dataB64) }, {
         onProgress: (frac, label) => setProgress(frac, label),
@@ -4369,7 +5003,7 @@ const App = (() => {
       if (state.wtLastRender && state.wtLastRender.slot === slot) selectWavetable(slot);
       toast(`Wavetable "${entry.name}" written to slot ${slot} ✓`, 'ok');
     } catch (e) {
-      toast('Wavetable upload failed: ' + (e.message || e), 'err', 6000);
+      toast('Wavetable substitution failed: ' + (e.message || e), 'err', 6000);
     } finally {
       setBusy(false);
       setProgress(null);
@@ -4381,14 +5015,14 @@ const App = (() => {
     const entry = state.smLib.find((e) => e.id === id);
     if (!entry) return;
     const firstFree = (state.samples || []).findIndex((h) => !h || h.empty) + 1 || 1;
-    const slot = await chooseSlotModal('Send sample to MicroFreak', 128, firstFree);
+    const slot = await chooseSlotModal('Send sample to MicroFreak', 128, firstFree, { headers: state.samples });
     if (!slot) return;
     await uploadSampleEntryToSlot(entry, slot);
   }
 
   async function uploadSampleEntryToSlot(entry, slot) {
-    setBusy(true, `Uploading sample to slot ${slot}…`);
-    setProgress(0, 'Uploading sample…');
+    setBusy(true, `Substituting sample in slot ${slot}…`);
+    setProgress(0, 'Substituting sample…');
     try {
       await MF.writeSample(slot, entry.name, Mfp.b64ToBytes(entry.dataB64), {
         onProgress: (frac, label) => setProgress(frac, label),
@@ -4404,7 +5038,7 @@ const App = (() => {
       if (state.smLastRender && state.smLastRender.slot === slot) selectSample(slot);
       toast(`Sample "${entry.name}" written to slot ${slot} ✓`, 'ok');
     } catch (e) {
-      toast('Sample upload failed: ' + (e.message || e), 'err', 6000);
+      toast('Sample substitution failed: ' + (e.message || e), 'err', 6000);
     } finally {
       setBusy(false);
       setProgress(null);
@@ -4568,59 +5202,183 @@ const App = (() => {
       return toast('Invalid backup file: ' + (e.message || e), 'err', 6000);
     }
     const nGlobals = Object.keys(backup.globals || {}).length;
+    // selezione di cosa ripristinare (tutto selezionato di default)
+    const pick = { presets: true, wavetables: true, samples: true, settings: true };
+    const chk = (id) => {
+      const node = document.getElementById(id);
+      return !node || node.checked;
+    };
     const yes = await showModal('Restore full backup',
-      `<p>This will <strong>overwrite</strong> the MicroFreak with the backup:
-         <strong>${backup.presets.length}</strong> presets, <strong>${backup.wavetables.length}</strong> wavetables,
-         <strong>${backup.samples.length}</strong> samples and <strong>${nGlobals}</strong> device settings.
-         Each write is verified; on error the previous content is restored.</p>
-       <p class="muted" style="font-size:12px">This can take several minutes. You can cancel at any time.</p>`,
-      { okLabel: 'Restore' });
+      `<p>This <strong>overwrites</strong> the MicroFreak with the backup. Every item is written and then
+         <strong>read back to verify it</strong>; anything that does not match is listed at the end.</p>
+       <div class="field"><label><input type="checkbox" id="rs-presets" checked />
+         Presets (${backup.presets.length})</label></div>
+       <div class="field"><label><input type="checkbox" id="rs-wavetables" checked />
+         Wavetables (${backup.wavetables.length})</label></div>
+       <div class="field"><label><input type="checkbox" id="rs-samples" checked />
+         Samples (${backup.samples.length})</label></div>
+       <div class="field"><label><input type="checkbox" id="rs-settings" checked />
+         Device settings (${nGlobals})</label></div>
+       <p class="muted" style="font-size:12px">Settings take seconds; samples take minutes each (identical ones
+         are skipped). Cancelling — or an error — keeps what has already been written, with one exception:
+         a sample interrupted mid-transfer leaves <strong>that slot empty</strong> (the firmware needs a clean
+         slot); its previous content is still in your backup file.</p>`,
+      {
+        okLabel: 'Restore',
+        onOk: () => {
+          pick.presets = chk('rs-presets');
+          pick.wavetables = chk('rs-wavetables');
+          pick.samples = chk('rs-samples');
+          pick.settings = chk('rs-settings');
+          if (!pick.presets && !pick.wavetables && !pick.samples && !pick.settings) {
+            toast('Select at least one group to restore.', 'err');
+            return false; // lascia aperta la modale
+          }
+          return true;
+        },
+      });
     if (!yes) return;
+
+    const presetList = pick.presets ? backup.presets : [];
+    const wtList = pick.wavetables ? backup.wavetables : [];
+    const smList = pick.samples ? backup.samples : [];
+    const globalList = pick.settings ? Object.entries(backup.globals || {}) : [];
 
     setBusy(true, 'Restoring presets…');
     el.btnCancel.classList.remove('hidden');
     state.cancelRequested = false;
     let done = 0;
     let failed = 0;
-    const total = Math.max(1, backup.presets.length + backup.wavetables.length + backup.samples.length + nGlobals);
+    let skipped = 0;
+    let interrupted = 0; // elementi fermati da Cancel o dal watchdog: non sono errori
+    const failures = [];
+    const total = Math.max(1, presetList.length + wtList.length + smList.length + globalList.length);
     const step = (label) => setProgress(done / total, `${label} (${done}/${total})`);
+
+    // Un elemento alla volta, con due protezioni:
+    //  - il progresso DENTRO l'elemento (i sample durano minuti: senza questo
+    //    la barra sembrava bloccata);
+    //  - un watchdog di inattività: se un elemento non avanza entro STALL_MS
+    //    viene interrotto (shouldCancel) invece di restare appeso per ore.
+    const STALL_MS = 90000;
+    let stallTimer = null;
+    let stalled = false;
+    const armWatchdog = () => {
+      stalled = false;
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => { stalled = true; }, STALL_MS);
+    };
+    const disarmWatchdog = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = null;
+    };
+    const abortItem = () => state.cancelRequested || stalled;
+    // Un elemento interrotto su richiesta (Cancel) o dal watchdog non è un errore:
+    // va contato a parte, altrimenti il riepilogo finale lo elenca fra i guasti.
+    const abortedBy = (e) => (e && e.message === 'Operation cancelled') || state.cancelRequested || stalled;
+    const itemProgress = (label) => (f, l) => {
+      armWatchdog();
+      const frac = Math.max(0, Math.min(1, Number(f) || 0));
+      setProgress((done + frac) / total, l || label);
+    };
+
     try {
-      for (const p of backup.presets) {
+      for (const p of presetList) {
         if (state.cancelRequested) throw new Error('Operation cancelled');
         try {
-          await MF.writePreset(p.slot, { name: p.name, category: p.category, p1: p.p1, data: Mfp.b64ToBytes(p.dataB64) }, { timeoutMs: 4000 });
-        } catch {
-          failed++;
+          const want = Mfp.b64ToBytes(p.dataB64);
+          armWatchdog();
+          await MF.writePreset(p.slot, { name: p.name, category: p.category, p1: p.p1, data: want }, { timeoutMs: 4000 });
+          // verifica: lo slot viene riletto e confrontato byte per byte
+          const rb = await MF.readPreset(p.slot, { timeoutMs: 4000 });
+          disarmWatchdog();
+          if (!rb.data || rb.data.length !== want.length || !MF.bytesEqual(rb.data, want)) {
+            throw new Error('readback does not match the backup');
+          }
+          if ((rb.name || '') !== (p.name || '')) {
+            throw new Error(`readback name is "${rb.name}" instead of "${p.name}"`);
+          }
+        } catch (e) {
+          disarmWatchdog();
+          if (abortedBy(e)) interrupted++;
+          else {
+            failed++;
+            failures.push(`preset ${p.slot}`);
+            status(`Slot ${p.slot}: ${e && e.message || e}`);
+          }
         }
         done++;
         step('Presets');
       }
-      for (const w of backup.wavetables) {
+      for (const w of wtList) {
         if (state.cancelRequested) throw new Error('Operation cancelled');
         try {
-          await MF.writeWavetable(w.slot, { name: w.name, data: Mfp.b64ToBytes(w.dataB64) });
-        } catch {
-          failed++;
+          armWatchdog();
+          await MF.writeWavetable(w.slot, { name: w.name, data: Mfp.b64ToBytes(w.dataB64) }, {
+            onProgress: itemProgress(`Wavetable ${w.slot}`),
+            shouldCancel: abortItem,
+          });
+          disarmWatchdog();
+        } catch (e) {
+          disarmWatchdog();
+          if (abortedBy(e)) interrupted++;
+          else {
+            failed++;
+            failures.push(`wavetable ${w.slot}`);
+            status(`Wavetable ${w.slot}: ${e && e.message || e}`);
+          }
         }
         done++;
         step('Wavetables');
       }
-      for (const s of backup.samples) {
+      for (const s of smList) {
         if (state.cancelRequested) throw new Error('Operation cancelled');
         try {
-          await MF.writeSample(s.slot, s.name, Mfp.b64ToBytes(s.dataB64));
-        } catch {
-          failed++;
+          // salta i sample già identici: nome + dimensione + checksum
+          // nell'header bastano a riconoscerli senza rileggere tutto il corpo.
+          // Rende un ripristino (anche ripreso dopo un annullamento) molto più rapido.
+          const cur = await MF.readSampleHeader(s.slot);
+          if (!cur.empty && typeof s.checksum === 'number'
+              && cur.checksum === s.checksum && cur.sizeBytes === s.sizeBytes
+              && String(cur.name || '') === String(s.name || '')) {
+            skipped++;
+            done++;
+            step('Samples');
+            setProgress(done / total, `Sample ${s.slot}: already identical, skipped`);
+            continue;
+          }
+          armWatchdog();
+          await MF.writeSample(s.slot, s.name, Mfp.b64ToBytes(s.dataB64), {
+            onProgress: itemProgress(`Sample ${s.slot} (${s.name || ''})`),
+            shouldCancel: abortItem,
+          });
+          disarmWatchdog();
+        } catch (e) {
+          disarmWatchdog();
+          if (abortedBy(e)) interrupted++;
+          else {
+            failed++;
+            failures.push(`sample ${s.slot}`);
+            status(`Sample ${s.slot}: ${e && e.message || e}`);
+          }
         }
         done++;
         step('Samples');
       }
-      for (const [name, value] of Object.entries(backup.globals || {})) {
+      for (const [name, value] of globalList) {
         if (state.cancelRequested) throw new Error('Operation cancelled');
         try {
+          armWatchdog();
           await MF.writeGlobalSetting(name, value);
-        } catch {
-          failed++;
+          disarmWatchdog();
+        } catch (e) {
+          disarmWatchdog();
+          if (abortedBy(e)) interrupted++;
+          else {
+            failed++;
+            failures.push(`setting ${name}`);
+            status(`Setting ${name}: ${e && e.message || e}`);
+          }
         }
         done++;
         step('Settings');
@@ -4631,21 +5389,313 @@ const App = (() => {
       } catch {
         /* la risincronizzazione non blocca l'esito */
       }
-      toast(`Restore complete: ${done - failed}/${done} items${failed ? `, ${failed} failed` : ''} ✓`, 'ok', 7000);
+      // i globali non fanno parte della risincronizzazione: se la scheda Device
+      // è già stata aperta va riletta, altrimenti mostrerebbe i valori vecchi
+      if (pick.settings && state.deviceGlobals && Midi.isOpen()) {
+        try {
+          await loadDeviceGlobals({ quiet: true });
+        } catch {
+          /* la lettura dei globali non blocca l'esito */
+        }
+      }
+      const okCount = done - failed - interrupted;
+      const skipNote = skipped ? ` (${skipped} already identical, skipped)` : '';
+      const stopNote = interrupted ? `, ${interrupted} interrupted` : '';
+      if (!failed && !interrupted) {
+        toast(`Restore complete: ${okCount}/${done} items written and verified${skipNote} ✓`, 'ok', 8000);
+      } else if (!failed) {
+        toast(`Restore interrupted: ${okCount}/${done} items written and verified${stopNote}${skipNote}.`, 'err', 9000);
+      } else {
+        const shown = failures.slice(0, 6).join(', ') + (failures.length > 6 ? ', …' : '');
+        toast(`Restore finished with problems: ${okCount}/${done} verified, ${failed} failed (${shown})${stopNote}${skipNote}.`, 'err', 10000);
+      }
     } catch (e) {
       if (!(e && e.message === 'Operation cancelled')) {
         toast('Restore failed: ' + (e.message || e), 'err', 6000);
+      } else {
+        toast(`Restore cancelled: ${done}/${total} items processed, the rest is untouched.`, 'err', 8000);
       }
     } finally {
+      disarmWatchdog();
       setBusy(false);
       setProgress(null);
       el.btnCancel.classList.add('hidden');
     }
   }
 
+  // ------------------------------------------------------------------ auto-update
+
+  /**
+   * Modale di aggiornamento: consenso + changelog + avanzamento + riavvio.
+   * Gli eventi arrivano dal main process via 'update-event' (solo app
+   * impacchettata / installer NSIS); in sviluppo questa sezione resta inerte.
+   */
+  function initUpdater() {
+    if (!window.mfapi || typeof window.mfapi.onUpdateEvent !== 'function') return;
+    let phase = 'idle'; // idle | available | downloading | downloaded
+    let downloading = false;
+
+    const fmtBytes = (n) => {
+      const v = Number(n) || 0;
+      if (v <= 0) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB'];
+      let i = 0;
+      let x = v;
+      while (x >= 1024 && i < units.length - 1) { x /= 1024; i++; }
+      return `${x.toFixed(1)} ${units[i]}`;
+    };
+
+    const setState = (s) => {
+      phase = s;
+      const prim = el.updatePrimary;
+      const later = el.updateLater;
+      switch (s) {
+        case 'available':
+          prim.textContent = 'Update now';
+          prim.classList.remove('hidden');
+          prim.disabled = false;
+          later.textContent = 'Later';
+          later.classList.remove('hidden');
+          el.updateProgress.classList.add('hidden');
+          prim.focus();
+          break;
+        case 'downloading':
+          prim.textContent = 'Downloading…';
+          prim.disabled = true;
+          later.textContent = 'Hide';
+          el.updateProgress.classList.remove('hidden');
+          break;
+        case 'downloaded':
+          prim.textContent = 'Restart now';
+          prim.classList.remove('hidden');
+          prim.disabled = false;
+          later.textContent = 'Later';
+          later.classList.remove('hidden');
+          el.updateProgress.classList.add('hidden');
+          prim.focus();
+          break;
+        case 'idle':
+        default:
+          prim.classList.add('hidden');
+          later.classList.add('hidden');
+          el.updateProgress.classList.add('hidden');
+          break;
+      }
+    };
+
+    const hide = () => {
+      el.updateBackdrop.classList.add('hidden');
+      setState('idle');
+    };
+
+    el.updateLater.addEventListener('click', () => {
+      if (downloading) {
+        // nasconde solo la finestra, il download prosegue in background
+        el.updateBackdrop.classList.add('hidden');
+      } else {
+        hide();
+      }
+      window.mfapi.sendUpdateAction('later').catch(() => {});
+    });
+
+    el.updatePrimary.addEventListener('click', () => {
+      if (phase === 'available') {
+        downloading = true;
+        setState('downloading');
+        el.updateProgressFill.style.width = '0%';
+        el.updateProgressText.textContent = 'Starting download…';
+        window.mfapi.sendUpdateAction('download').catch(() => {});
+      } else if (phase === 'downloaded') {
+        window.mfapi.sendUpdateAction('install').catch(() => {});
+      }
+    });
+
+    el.updateBackdrop.addEventListener('click', (e) => {
+      if (e.target === el.updateBackdrop && phase !== 'downloading') hide();
+    });
+
+    window.mfapi.onUpdateEvent((ev) => {
+      try {
+        switch (ev.type) {
+          case 'available': {
+            manualCheckPending = false;
+            const notes = ev.releaseNotes || '';
+            el.updateChangelog.textContent = notes || 'No changelog available for this release.';
+            el.updateChangelog.classList.remove('hidden');
+            el.updateTitle.textContent = `Update available — v${esc(ev.version)}`;
+            el.updateBody.innerHTML = '<p>A new version of ManageFreak is ready. Your presets, libraries and settings are kept — only the application is replaced.</p>';
+            setState('available');
+            el.updateBackdrop.classList.remove('hidden');
+            break;
+          }
+          case 'downloading':
+          case 'progress': {
+            if (phase !== 'downloading' && phase !== 'available') break;
+            downloading = true;
+            if (phase !== 'downloading') setState('downloading');
+            const pct = Math.min(100, Math.max(0, ev.percent || 0));
+            el.updateProgressFill.style.width = `${pct}%`;
+            const speed = ev.bytesPerSecond ? ` · ${fmtBytes(ev.bytesPerSecond)}/s` : '';
+            el.updateProgressText.textContent = `${pct.toFixed(1)}% · ${fmtBytes(ev.transferred)} / ${fmtBytes(ev.total)}${speed}`;
+            break;
+          }
+          case 'downloaded':
+            downloading = false;
+            updateReadyVersion = ev.version || '';
+            el.updateTitle.textContent = `Update ready — v${esc(ev.version)}`;
+            el.updateBody.innerHTML = '<p>The update has been downloaded and verified. Restart ManageFreak now to install it (the app will close briefly).</p>';
+            el.updateChangelog.classList.add('hidden');
+            setState('downloaded');
+            el.updateBackdrop.classList.remove('hidden');
+            break;
+          case 'not-available':
+            // nessun aggiornamento: se l'utente stava guardando la modale, la chiudiamo
+            if (phase !== 'idle') hide();
+            // check manuale esplicito → conferma visiva
+            if (manualCheckPending) {
+              manualCheckPending = false;
+              toast(`You are up to date (v${appVersion})`, 'ok', 5000);
+            }
+            break;
+          case 'error':
+            downloading = false;
+            manualCheckPending = false;
+            // il check automatico all'avvio resta silenzioso; gli errori di
+            // download/installazione avviati dall'utente vanno sempre mostrati
+            if (ev.silent) break;
+            toast('Update error: ' + (ev.message || 'unknown'), 'err', 8000);
+            if (phase === 'downloading' || ev.phase === 'download') {
+              hide();
+              toast('Download failed. Try again later or download the new installer manually.', 'err', 8000);
+            } else if (ev.phase === 'install') {
+              toast('Installation could not start. Reopen the app and try again.', 'err', 8000);
+            }
+            break;
+          default:
+            break;
+        }
+      } catch (e) {
+        toast('Update UI error: ' + (e.message || e), 'err', 8000);
+      }
+    });
+  }
+
+  // ------------------------------------------------------------------ menu About / Aggiornamenti
+
+  /** Apre il menu (versione + changelog ultima release + check aggiornamenti). */
+  async function openAppMenu() {
+    if (!el.appMenu.classList.contains('hidden')) return;
+    el.appMenu.classList.remove('hidden');
+    el.appMenuVersion.textContent = appVersion ? `v${appVersion}` : '';
+    // se un aggiornamento è già scaricato il pulsante installa invece di cercare
+    if (el.btnCheckUpdates) {
+      el.btnCheckUpdates.textContent = updateReadyVersion
+        ? `Restart to install v${updateReadyVersion}`
+        : 'Check for updates';
+    }
+    // riga informativa fissa sulle piattaforme senza aggiornamento automatico
+    const oldNote = el.appMenu.querySelector('.app-menu-note');
+    if (oldNote) oldNote.remove();
+    if (!canAutoUpdate && !updateReadyVersion) {
+      const note = document.createElement('div');
+      note.className = 'app-menu-note';
+      note.textContent = 'Automatic updates are available on the Windows build only — here you can check for a new version and download it manually.';
+      const actions = el.appMenu.querySelector('.app-menu-actions');
+      if (actions) actions.prepend(note);
+    }
+    el.appMenuChangelog.textContent = 'Loading…';
+    try {
+      const rel = await window.mfapi.latestRelease();
+      if (!rel || rel.error) {
+        el.appMenuChangelog.textContent = rel && rel.error
+          ? `Changelog unavailable (${rel.error}).`
+          : 'Changelog unavailable.';
+        return;
+      }
+      el.appMenuChangelog.textContent = rel.body || `No changelog for ${rel.version || 'the latest release'}.`;
+    } catch {
+      el.appMenuChangelog.textContent = 'Changelog unavailable.';
+    }
+  }
+
+  function closeAppMenu() {
+    el.appMenu.classList.add('hidden');
+  }
+
+  function initAppMenu() {
+    if (!el.appBrand || !el.appMenu) return;
+    el.appBrand.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (el.appMenu.classList.contains('hidden')) openAppMenu();
+      else closeAppMenu();
+    });
+    // click fuori dal menu → chiudi
+    document.addEventListener('click', (e) => {
+      if (!el.appMenu.classList.contains('hidden') && !e.target.closest('.brand-wrap')) closeAppMenu();
+    });
+    // Esc → chiudi (prima di qualunque altro handler)
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !el.appMenu.classList.contains('hidden')) {
+        e.stopImmediatePropagation();
+        closeAppMenu();
+      }
+    }, true);
+    // check manuale degli aggiornamenti (o installazione, se già scaricato)
+    if (el.btnCheckUpdates) {
+      el.btnCheckUpdates.addEventListener('click', async () => {
+        closeAppMenu();
+        if (updateReadyVersion) {
+          toast('Restarting to install the update…');
+          window.mfapi.sendUpdateAction('install').catch((e) => {
+            toast('Install failed: ' + (e && e.message || e), 'err', 6000);
+          });
+          return;
+        }
+        manualCheckPending = true;
+        toast('Checking for updates…');
+        try {
+          const res = await window.mfapi.sendUpdateAction('check');
+          // piattaforme senza aggiornamento automatico (macOS/Linux/portable):
+          // risposta chiara invece di un errore tecnico incomprensibile
+          if (res && res.unsupported) {
+            manualCheckPending = false;
+            if (res.error) {
+              toast('Could not check for updates: ' + res.error, 'err', 7000);
+              return;
+            }
+            if (res.hasUpdate) {
+              const go = await showModal(`Update available — v${esc(res.latest)}`,
+                `<p>ManageFreak <strong>v${esc(res.latest)}</strong> is available (you have v${esc(res.current)}).</p>
+                 <p class="muted" style="font-size:12px">Automatic updates work on the installed Windows build only.
+                 Download the new version from the releases page and install it as usual.</p>`,
+                { okLabel: 'Open download page' });
+              if (go) window.mfapi.openExternal(res.url);
+            } else {
+              toast(`You are up to date (v${appVersion}). Automatic updates are Windows-only.`, 'ok', 7000);
+            }
+          }
+        } catch (e) {
+          manualCheckPending = false;
+          toast('Update check failed: ' + (e.message || e), 'err', 6000);
+        }
+      });
+    }
+  }
+
   // ------------------------------------------------------------------ init
 
   async function init() {
+    // auto-update: si sottoscrive agli eventi del main process (inerte in dev)
+    initUpdater();
+    // durante un trascinamento l'unica indicazione di posizione deve essere la
+    // barretta di inserimento: niente bordo/alone di hover sulla riga sotto il mouse
+    document.addEventListener('dragstart', () => document.body.classList.add('mf-dragging'));
+    const endDrag = () => { document.body.classList.remove('mf-dragging'); clearDragIndicator(); };
+    document.addEventListener('dragend', endDrag);
+    document.addEventListener('drop', endDrag);
+    // menu About/Aggiornamenti sul nome dell'app
+    initAppMenu();
+
     // listener libreria → aggiorna griglia e sidebar (senza toccare il pannello
     // dettagli, per non perdere il focus durante la digitazione delle note)
     Library.subscribe(() => {
@@ -4658,6 +5708,31 @@ const App = (() => {
       if (Midi.isOpen()) syncAllFromDevice();
     });
     el.btnConnect.addEventListener('click', connect);
+    // se la connessione MIDI cade, dirlo subito: prima si perdeva in silenzio
+    // (l'app sembrava funzionare mentre il MicroFreak non riceveva più nulla)
+    let midiWasOpen = false;
+    let portsDebounce = null;
+    Midi.onStateChange(() => {
+      // un cambio nell'elenco dei dispositivi MIDI (replug del MicroFreak, altra
+      // app che apre/chiude una porta, porta virtuale che appare) deve ricostruire
+      // i menu: prima questo evento serviva solo ad accorgersi della disconnessione
+      // e le porte che arrivavano dopo restavano invisibili.
+      if (!portsDebounce) {
+        portsDebounce = setTimeout(() => {
+          portsDebounce = null;
+          refreshPorts({ quiet: true });
+        }, 400);
+      }
+      if (Midi.isOpen()) { midiWasOpen = true; return; }
+      if (!midiWasOpen) return;
+      midiWasOpen = false;
+      if (el.connStatus) {
+        el.connStatus.className = 'status-dot error';
+        el.connStatus.title = 'MIDI connection lost';
+      }
+      status('MIDI connection lost — reconnect the MicroFreak.');
+      toast('MIDI connection lost: the MicroFreak is no longer reachable.', 'err', 7000);
+    });
     el.btnReadAll.addEventListener('click', readAllOccupied);
     el.btnDownloadBank.addEventListener('click', downloadBankToPC);
     el.btnUploadLibrary.addEventListener('click', uploadLibraryToDevice);
@@ -4692,6 +5767,7 @@ const App = (() => {
         const act = btn.dataset.dsel;
         if (act === 'clear') return clearDeviceSelection();
         if (act === 'read') readDeviceSelectionToLibrary();
+        if (act === 'volume') setVolumeOnDeviceSelection();
         if (act === 'delete') initDeviceSlots(deviceSelIds());
       });
     });
@@ -4735,40 +5811,42 @@ const App = (() => {
 
     // drop da dispositivo → libreria PC (lettura dello slot, inserito nella posizione di rilascio)
     const libDropInsertIndex = (clientX, clientY) => {
-      const cards = Array.from(el.libGrid.querySelectorAll('.lib-card, .lib-row'));
-      if (!cards.length) return null;
-      let target = null;
-      for (const c of cards) {
-        const r = c.getBoundingClientRect();
-        if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
-          target = c;
-          break;
-        }
-      }
-      if (!target) {
-        for (const c of cards) {
-          const r = c.getBoundingClientRect();
-          if (clientY < r.top) { target = c; break; }
-        }
-        if (!target) target = cards[cards.length - 1];
-      }
-      const rect = target.getBoundingClientRect();
-      const isList = el.libGrid.classList.contains('lib-list-view');
-      const mid = isList ? rect.top + rect.height / 2 : rect.left + rect.width / 2;
-      const after = isList ? clientY >= mid : clientX >= mid;
-      const idx = Library.all().findIndex((x) => x.id === parseInt(target.dataset.id, 10));
-      return idx < 0 ? null : idx + (after ? 1 : 0);
+      const t = libDropTargetFromPoint(clientX, clientY);
+      if (!t) return null;
+      const idx = Library.all().findIndex((x) => x.id === t.id);
+      return idx < 0 ? null : idx + (t.after ? 1 : 0);
     };
     el.libGrid.addEventListener('dragover', (e) => {
-      if (e.dataTransfer.types.includes('application/x-managefreak-slot')) {
-        e.preventDefault();
-        el.libGrid.classList.add('drop-slot');
-      }
-    });
-    el.libGrid.addEventListener('dragleave', () => el.libGrid.classList.remove('drop-slot'));
-    el.libGrid.addEventListener('drop', (e) => {
+      const types = e.dataTransfer.types;
+      if (!types.includes('application/x-managefreak-slot') && !types.includes('application/x-managefreak')) return;
       e.preventDefault();
-      el.libGrid.classList.remove('drop-slot');
+      // sia il riordino interno sia l'import dal device mostrano la barretta
+      // nella posizione esatta di inserimento (prima era un riquadro tratteggiato
+      // attorno a tutta la griglia: non si capiva dove sarebbe finito il preset)
+      showLibInsertIndicator(e.clientX, e.clientY);
+    });
+    el.libGrid.addEventListener('drop', (e) => {
+      // riordino della libreria quando il rilascio cade nel gap fra le card
+      const onCard = e.target && e.target.closest && e.target.closest('.lib-card, .lib-row');
+      if (e.dataTransfer.types.includes('application/x-managefreak') && !onCard) {
+        const t = libDropTargetFromPoint(e.clientX, e.clientY);
+        if (t) {
+          e.preventDefault();
+          clearDragIndicator();
+          const srcId = parseInt(e.dataTransfer.getData('application/x-managefreak'), 10);
+          if (srcId && srcId !== t.id) {
+            if (state.dragBlockIds && state.dragBlockIds.length > 1) {
+              Library.moveBlock(state.dragBlockIds, t.id, t.after);
+            } else {
+              Library.move(srcId, t.id, t.after);
+            }
+          }
+          state.dragBlockIds = null;
+          return;
+        }
+      }
+      e.preventDefault();
+      clearDragIndicator();
       const slotStr = e.dataTransfer.getData('application/x-managefreak-slot');
       const slot = slotStr ? parseInt(slotStr, 10) : 0;
       if (!slot) return;
@@ -4803,7 +5881,7 @@ const App = (() => {
     // ---------------------------------------------------------------------
     const clearSlotHighlights = () => {
       el.slotList.querySelectorAll('.slot-row').forEach((r) =>
-        r.classList.remove('drag-over', 'swap-over', 'drop-before', 'drop-after'));
+        r.classList.remove('drag-over', 'swap-over', 'write-over', 'drop-before', 'drop-after'));
     };
     const resolveSlotDrop = (clientY) => {
       const rows = Array.from(el.slotList.querySelectorAll('.slot-row'));
@@ -4839,9 +5917,13 @@ const App = (() => {
       if (entryId) {
         const entry = Library.get(parseInt(entryId, 10));
         if (!entry) return;
+        // dico anche cosa viene sostituito: è una scrittura, non un inserimento
+        const cur = state.device && state.device[target.slot - 1];
+        const curName = cur && !cur.error && !cur.empty ? `"${cur.name}"` : 'the current content';
         const yes = await showModal(
           `Confirm write to slot ${target.slot}`,
-          `<p>Write <strong>"${esc(entry.name)}"</strong> to slot ${target.slot} on the MicroFreak?</p>
+          `<p>Write <strong>"${esc(entry.name)}"</strong> to slot ${target.slot} on the MicroFreak,
+             replacing ${esc(curName)}?</p>
            <label><input type="checkbox" id="m-select" checked /> Select the preset after writing</label>`,
           { okLabel: 'Send to MicroFreak' }
         );
@@ -4864,14 +5946,26 @@ const App = (() => {
       if (!types.includes('application/x-managefreak') && !types.includes('application/x-managefreak-slot')) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
-      clearSlotHighlights();
       const target = resolveSlotDrop(e.clientY);
       if (!target) return;
-      const row = el.slotList.querySelector(`.slot-row[data-slot="${target.slot}"]`);
+      // Preset trascinato DALLA LIBRERIA: non esiste un inserimento fra slot (è
+      // sempre una scrittura nello slot sotto il puntatore), quindi niente
+      // barretta: solo l'evidenziazione dello slot che verrà scritto.
+      if (types.includes('application/x-managefreak')) {
+        const row = el.slotList.querySelector(`.slot-row[data-slot="${target.slot}"]`);
+        if (row) setDragIndicator(row, 'swap-over');
+        return;
+      }
+      // Preset trascinato da uno slot all'altro: qui sì che è un inserimento
+      // (shift), quindi stesso punto → stessa indicazione centrata nel gap
+      const rows = Array.from(el.slotList.querySelectorAll('.slot-row'));
+      const idx = rows.findIndex((r) => parseInt(r.dataset.slot, 10) === target.slot);
+      const ind = (target.mode === 'before' && idx > 0)
+        ? { slot: parseInt(rows[idx - 1].dataset.slot, 10), mode: 'after' }
+        : target;
+      const row = el.slotList.querySelector(`.slot-row[data-slot="${ind.slot}"]`);
       if (row) {
-        if (target.mode === 'onto') row.classList.add('swap-over');
-        else if (target.mode === 'before') row.classList.add('drop-before');
-        else row.classList.add('drop-after');
+        setDragIndicator(row, ind.mode === 'onto' ? 'swap-over' : ind.mode === 'before' ? 'drop-before' : 'drop-after');
       }
     });
     el.slotList.addEventListener('dragleave', (e) => {
@@ -4888,6 +5982,17 @@ const App = (() => {
 
     // scorciatoie: Esc deseleziona, Ctrl+A seleziona tutti, Canc elimina (con conferma)
     document.addEventListener('keydown', (e) => {
+      // se la modale di update è aperta, Esc = Later/Hide, Enter = azione principale
+      if (!el.updateBackdrop.classList.contains('hidden')) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          el.updateLater.click();
+        } else if (e.key === 'Enter' && !el.updatePrimary.classList.contains('hidden') && !el.updatePrimary.disabled) {
+          e.preventDefault();
+          el.updatePrimary.click();
+        }
+        return;
+      }
       const ae = document.activeElement;
       const typing = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
       // le scorciatoie da tastiera valgono solo nella vista Presets (o nelle
@@ -4935,6 +6040,8 @@ const App = (() => {
     });
 
     const info = await window.mfapi.appInfo();
+    appVersion = info.version;
+    canAutoUpdate = info.canAutoUpdate !== false;
     document.title = `ManageFreak v${info.version}`;
 
     await Library.load();
@@ -4951,6 +6058,18 @@ const App = (() => {
 
     if (Midi.supported()) {
       await refreshPorts();
+      // se non compare nessuna porta può essere un hiccup del driver USB MIDI
+      // (capita dopo una chiusura forzata dell'app): un secondo tentativo, poi
+      // un messaggio chiaro invece di menù vuoti e inspiegabili
+      if (!Midi.inputs().length && !Midi.outputs().length) {
+        await new Promise((r) => setTimeout(r, 900));
+        await refreshPorts({ quiet: true });
+        if (!Midi.inputs().length && !Midi.outputs().length) {
+          toast('No MIDI ports found — Windows is not exposing any MIDI device. Unplug and replug the MicroFreak USB cable (or restart the app): ManageFreak keeps looking and will connect on its own.', 'err', 14000);
+          status('No MIDI ports found. Replug the MicroFreak USB cable — still searching…');
+          schedulePortWatch();
+        }
+      }
       // connetti automaticamente se entrambe le porte puntano a un MicroFreak
       const inName = el.midiInput.selectedOptions[0]?.textContent.toLowerCase() || '';
       const outName = el.midiOutput.selectedOptions[0]?.textContent.toLowerCase() || '';
@@ -4963,6 +6082,17 @@ const App = (() => {
   }
 
   document.addEventListener('DOMContentLoaded', init);
+
+  // Rilascio delle porte MIDI prima di uscire. È la cura del bug "la prima volta
+  // funziona, poi chiudo e riapro e non trova più le porte": senza chiudere
+  // davvero le porte a livello di sistema, Windows le tiene occupate e l'istanza
+  // successiva dell'app enumera zero dispositivi MIDI.
+  const releaseMidi = () => {
+    try { Midi.shutdown(); } catch { /* niente da fare mentre si esce */ }
+  };
+  window.addEventListener('beforeunload', releaseMidi);
+  window.addEventListener('pagehide', releaseMidi);
+  if (window.mfapi && window.mfapi.onPrepareQuit) window.mfapi.onPrepareQuit(releaseMidi);
 
   return { refreshPorts, connect, scanDevice, renderDevice, renderLibrary };
 })();

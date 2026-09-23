@@ -10,11 +10,25 @@
 </head>
 <body>
   <header id="topbar">
-    <div class="brand">
-      <span class="logo">⬢</span>
-      <span class="brand-name">ManageFreak</span>
-      <span id="fw-version" class="brand-fw hidden"></span>
-      <span class="brand-sub">Arturia MicroFreak preset manager</span>
+    <div class="brand-wrap">
+      <div class="brand" id="app-brand" title="ManageFreak">
+        <span class="logo">⬢</span>
+        <span class="brand-name">ManageFreak</span>
+        <span id="fw-version" class="brand-fw hidden"></span>
+        <span class="brand-sub">Arturia MicroFreak preset manager</span>
+      </div>
+      <div id="app-menu" class="app-menu hidden">
+        <div class="app-menu-title">
+          <span class="logo">⬢</span>
+          <span>ManageFreak</span>
+          <span id="app-menu-version" class="app-menu-version"></span>
+        </div>
+        <div class="app-menu-label">Changelog — latest release</div>
+        <div id="app-menu-changelog" class="app-menu-changelog">Loading…</div>
+        <div class="app-menu-actions">
+          <button id="btn-check-updates" class="btn primary">Check for updates</button>
+        </div>
+      </div>
     </div>
     <div class="device-controls">
       <select id="midi-input" title="MIDI input port"></select>
@@ -209,6 +223,7 @@
           <div id="device-selbar" class="sel-bar compact">
             <span id="device-sel-count" class="sel-count">0 selected</span>
             <button class="btn small" data-dsel="read">⬅ Import to library</button>
+            <button class="btn small" data-dsel="volume" title="Set the same volume on all selected presets">🔊 Volume…</button>
             <button class="btn small danger" data-dsel="delete" title="Initialize (Init) the selected slots">Delete</button>
             <button class="btn small" data-dsel="clear" title="Deselect">Deselect</button>
           </div>
@@ -255,6 +270,22 @@
       <div id="modal-actions">
         <button id="modal-cancel" class="btn">Cancel</button>
         <button id="modal-ok" class="btn primary">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="update-backdrop" class="hidden">
+    <div id="update-modal" class="modal">
+      <h3 id="update-title"></h3>
+      <div id="update-body"></div>
+      <div id="update-changelog" class="update-changelog hidden"></div>
+      <div id="update-progress" class="update-progress hidden">
+        <div class="update-progress-bar"><div id="update-progress-fill"></div></div>
+        <span id="update-progress-text"></span>
+      </div>
+      <div id="update-actions">
+        <button id="update-later" class="btn">Later</button>
+        <button id="update-primary" class="btn primary hidden">Update now</button>
       </div>
     </div>
   </div>

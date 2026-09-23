@@ -1,7 +1,7 @@
 {
   "name": "managefreak",
   "productName": "ManageFreak",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Open-source preset manager for the Arturia MicroFreak (Windows/macOS/Linux)",
   "main": "main.js",
   "author": {
@@ -21,25 +21,56 @@
     "electron": "^31.7.7",
     "electron-builder": "^24.13.3"
   },
+  "dependencies": {
+    "@julusian/midi": "^3.8.1",
+    "electron-updater": "^6.8.9"
+  },
   "build": {
     "appId": "dev.managefreak.app",
     "productName": "ManageFreak",
     "icon": "assets/icon.png",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "GiovanniBitbyBit",
+        "repo": "managefreak"
+      }
+    ],
     "files": [
       "main.js",
       "preload.js",
+      "midi-backend.js",
       "renderer/**/*",
       "assets/**/*"
     ],
+    "asarUnpack": [
+      "node_modules/@julusian/midi/**"
+    ],
+    "npmRebuild": false,
     "win": {
-      "target": ["nsis", "portable"]
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}"
     },
     "mac": {
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "category": "public.app-category.music"
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "category": "Audio"
     }
   }

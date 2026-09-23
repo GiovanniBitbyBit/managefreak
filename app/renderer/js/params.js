@@ -38,13 +38,29 @@ const Params = (() => {
     return out;
   }
 
-  /**
-   * Estrae i campi taggati firmware 5.
-   * @returns {Array} [{key, group, name, metadata, raw, s16}]
-   */
-  function parseStructured(data) {
-    if (!data || data.length !== 4672) return { fields: [], unpacked: null };
-    const unpacked = unpack8to7(data);
+  /** 7 byte raw → 8 byte MIDI (bitmap + 7 byte a 7 bit). Speculare di MF.pack7to8,
+   *  tenuto qui per non dipendere dall'ordine di caricamento degli script. */
+  function pack7to8(data) {
+    if (data.length % 7 !== 0) throw new Error('pack7to8: input length must be a multiple of 7');
+    const out = new Uint8Array((data.length / 7) * 8);
+    for (let block = 0; block * 7 < data.length; block++) {
+      const base = block * 7;
+      const outBase = block * 8;
+      let bitmap = 0;
+      for (let i = 0; i < 7; i++) {
+        if (data[base + i] & 0x80) bitmap |= 1 << i;
+      }
+      out[outBase] = bitmap;
+      for (let i = 0; i < 7; i++) {
+        out[outBase + 1 + i] = data[base + i] & 0x7f;
+      }
+    }
+    return out;
+  }
+
+  /** Cammina la struttura taggata di un corpo già unpackato (4088 byte).
+   *  Ogni campo include anche rawPos: offset dei 2 byte (LE) del valore raw. */
+  function walkFields(unpacked) {
     const fields = [];
     let group = null;
     let pos = 0;
@@ -71,12 +87,75 @@ const Params = (() => {
       const metadata = unpacked[end + 1];
       const raw = unpacked[end + 2] | (unpacked[end + 3] << 8);
       const s16 = raw < 0x8000 ? raw : raw - 0x10000;
-      fields.push({ key: `${group}.${name}`, group, name, metadata, raw, s16 });
+      fields.push({ key: `${group}.${name}`, group, name, metadata, raw, s16, rawPos: end + 2 });
       pos = end + 4;
     }
-    return { fields, unpacked };
+    return fields;
   }
 
+  /**
+   * Estrae i campi taggati firmware 5.
+   * @returns {Array} [{key, group, name, metadata, raw, s16, rawPos}]
+   */
+  function parseStructured(data) {
+    if (!data || data.length !== 4672) return { fields: [], unpacked: null };
+    const unpacked = unpack8to7(data);
+    return { fields: walkFields(unpacked), unpacked };
+  }
+
+  /**
+   * Imposta il valore raw (0..32767) di un campo taggato nel corpo preset
+   * (4672 byte, formato 8→7 bit) e restituisce un NUOVO corpo modificato.
+   * Restituisce null se il corpo non è taggato o il campo non esiste.
+   */
+  function setFieldValue(packedData, key, rawValue) {
+    if (!packedData || packedData.length !== 4672) return null;
+    const unpacked = unpack8to7(packedData);
+    const fields = walkFields(unpacked);
+    const f = fields.find((x) => x.key === key);
+    if (!f) return null;
+    const v = Math.max(0, Math.min(0xffff, Math.round(rawValue)));
+    const out = new Uint8Array(unpacked);
+    out[f.rawPos] = v & 0xff;
+    out[f.rawPos + 1] = (v >> 8) & 0xff;
+    return pack7to8(out);
+  }
+
+  /** Legge il valore raw (0..32767) di un campo taggato, o null se assente. */
+  function getFieldValue(packedData, key) {
+    if (!packedData || packedData.length !== 4672) return null;
+    const f = walkFields(unpack8to7(packedData)).find((x) => x.key === key);
+    return f ? f.raw : null;
+  }
+
+  // ------------------------------------------------------------------ volume
+
+  // Sul MicroFreak il Volume è mostrato in dB da -12 a +12 (0 dB = valore
+  // neutro). Il campo salvato nel preset è "Gen.PrstVol" (Preset Volume):
+  // il suo metadata è 24, cioè lo span in dB (-12..+12). Il campo
+  // "Gen.Volume" invece è costante (32766) in ogni preset e NON è il volume
+  // mostrato dal synth. Il raw 0..32767 è mappato linearmente sull'intervallo.
+  const VOLUME_KEY = 'Gen.PrstVol';
+  const VOLUME_DB_MIN = -12;
+  const VOLUME_DB_MAX = 12;
+  const VOLUME_DB_SPAN = VOLUME_DB_MAX - VOLUME_DB_MIN; // 24
+
+  const volumeDbToRaw = (db) => {
+    const v = Math.max(VOLUME_DB_MIN, Math.min(VOLUME_DB_MAX, db));
+    return Math.round(((v - VOLUME_DB_MIN) / VOLUME_DB_SPAN) * 32767);
+  };
+  const volumeRawToDb = (raw) => {
+    // clamp: un corpo corrotto può contenere un valore fuori scala (fino a
+    // 65535) che altrimenti verrebbe mostrato come "+36 dB"
+    const v = Math.max(0, Math.min(32767, Number.isFinite(Number(raw)) ? Number(raw) : 0));
+    return (v / 32767) * VOLUME_DB_SPAN + VOLUME_DB_MIN;
+  };
+
+  /** Formatta i dB come li mostra il MicroFreak: "+3 dB", "0 dB", "-12 dB". */
+  const volumeDbLabel = (db) => {
+    const v = Math.round(db);
+    return `${v > 0 ? '+' : ''}${v} dB`;
+  };
   // Campi normalizzati 0..1 (percentuale)
   const NORMALIZED = new Set([
     'VCO.Param1', 'VCO.Param2', 'VCO.Param3',
@@ -85,7 +164,7 @@ const Params = (() => {
     'EG1.FallSlp', 'EG1.Amount', 'Kbd.Glide',
     'Arp.Rate', 'Arp.Spice', 'Arp.Dice', 'LFO.Rate',
     'EG2.Attack', 'EG2.DecRel', 'EG2.Sustain',
-    'Gen.Volume', 'Gen.UniSprd',
+    'Gen.UniSprd',
   ]);
 
   // Campi bipolari -1..1 (matrice di modulazione Co1..Co7)
@@ -100,6 +179,9 @@ const Params = (() => {
       if (meta >= 22) name = ENGINES_22[idx] || `Engine ${idx}`;
       else name = idx <= 12 ? ENGINES_LEGACY[idx] : `Engine ${idx}`;
       return { text: name, kind: 'engine' };
+    }
+    if (key === VOLUME_KEY) {
+      return { text: volumeDbLabel(volumeRawToDb(field.raw)), kind: 'db' };
     }
     if (NORMALIZED.has(key)) {
       return { text: `${Math.round((field.raw / 32767) * 1000) / 10}%`, kind: 'percent' };
@@ -170,6 +252,7 @@ const Params = (() => {
     if (fields.length) {
       const interesting = fields.filter((f) => {
         if (f.key === 'VCO.Type') return true;
+        if (f.key === 'Gen.Volume') return false; // costante in ogni preset, non è il volume
         if (NORMALIZED.has(f.key)) return true;
         if (BIPOLAR_GROUPS.has(f.group)) return true;
         if (f.group === 'EG1' || f.group === 'EG2' || f.group === 'VCF' || f.group === 'VCO' ||
@@ -202,7 +285,13 @@ const Params = (() => {
     return { kind: 'legacy', rows };
   }
 
-  return { unpack8to7, parseStructured, describe, friendlyValue, legacyOscType, ENGINES_22 };
+  return {
+    unpack8to7, pack7to8, parseStructured, walkFields,
+    setFieldValue, getFieldValue,
+    VOLUME_KEY, VOLUME_DB_MIN, VOLUME_DB_MAX,
+    volumeDbToRaw, volumeRawToDb, volumeDbLabel,
+    describe, friendlyValue, legacyOscType, ENGINES_22,
+  };
 })();
 
 if (typeof module !== 'undefined') module.exports = Params;

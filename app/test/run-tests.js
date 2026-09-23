@@ -13,21 +13,41 @@ function makeMidiStub() {
   let script = [];
   let anyScript = [];
   let receiveQueue = [];
+  let replyFn = null; // modalità generativa: (op, payload, index) => messaggio
+  let replyIndex = 0;
+  // I messaggi SysEx ammettono SOLO byte 0..127: se l'app prova a inviare un
+  // valore più grande, Web MIDI (e il device) rifiutano il messaggio.
+  const assertSysexClean = (op, payload) => {
+    if (!payload) return;
+    for (let i = 0; i < payload.length; i++) {
+      const b = payload[i];
+      if (!Number.isInteger(b) || b < 0 || b > 127) {
+        throw new Error(
+          `payload SysEx non valido per op 0x${op.toString(16)}: byte ${b} all'indice ${i} (ammessi solo 0..127)`
+        );
+      }
+    }
+  };
   return {
     calls,
     queue(...msgs) { script = msgs; },
     queueAny(...msgs) { anyScript = msgs; },
     queueReceive(...msgs) { receiveQueue = msgs; },
+    /** Risposte generate al volo (per flussi lunghi: evita script enormi). */
+    queueReplies(fn) { replyFn = fn; replyIndex = 0; },
     get remaining() { return script.length; },
     Midi: {
       requestSysex: async (op, payload) => {
+        assertSysexClean(op, payload);
         calls.push({ op, payload: payload ? Array.from(payload) : null });
+        if (replyFn) return Uint8Array.from(replyFn(op, payload, replyIndex++));
         const next = script.shift();
         if (next instanceof Error) throw next;
         if (next === undefined) throw new Error('script esaurito');
         return Uint8Array.from(next);
       },
       requestSysexAny: async (op, payload) => {
+        assertSysexClean(op, payload);
         calls.push({ op, payload: payload ? Array.from(payload) : null, any: true });
         const next = anyScript.shift();
         if (next instanceof Error) throw next;
@@ -41,6 +61,7 @@ function makeMidiStub() {
         return Uint8Array.from(next);
       },
       sendSysex: (op, payload) => {
+        assertSysexClean(op, payload);
         calls.push({ op, payload: payload ? Array.from(payload) : null, send: true });
       },
       sendCC: () => {},
@@ -375,8 +396,9 @@ async function test(name, fn) {
     for (let i = 0; i < 3 + 146; i++) replies.push(sysex(0x00, 0x18, null));
     stub.queue(...replies);
 
+    // corpo preset realistico: i 4672 byte sono dati 8→7 bit (valori 0..127)
     const data = new Uint8Array(4672);
-    for (let i = 0; i < data.length; i++) data[i] = i & 0xff;
+    for (let i = 0; i < data.length; i++) data[i] = i % 120;
     await MF.writePreset(200, { name: 'W', category: 6, p1: 0, data });
 
     assert.strictEqual(stub.calls.length, 3 + 146);
@@ -396,7 +418,7 @@ async function test(name, fn) {
     for (let i = 0; i < 146; i++) {
       assert.strictEqual(stub.calls[3 + i].op, i === 145 ? 0x17 : 0x16);
       assert.strictEqual(stub.calls[3 + i].payload.length, 32);
-      assert.strictEqual(stub.calls[3 + i].payload[0], (i * 32) & 0xff);
+      assert.strictEqual(stub.calls[3 + i].payload[0], (i * 32) % 120);
     }
   });
 
@@ -423,8 +445,12 @@ async function test(name, fn) {
     global.Midi = stub.Midi;
     const replies = [];
     for (let i = 0; i < 512; i++) {
-      if (i === 5) replies.push(new Error('timeout'));
-      else replies.push(sysex(i & 0x7f, 0x52, headerPayload({ name: 'P' + i, program: i & 0x7f })));
+      if (i === 5) {
+        // il timeout viene ritentato 3 volte da requestRetry, poi l'errore passa
+        replies.push(new Error('timeout'), new Error('timeout'), new Error('timeout'));
+      } else {
+        replies.push(sysex(i & 0x7f, 0x52, headerPayload({ name: 'P' + i, program: i & 0x7f })));
+      }
     }
     stub.queue(...replies);
     const out = await MF.scanHeaders();
@@ -949,11 +975,8 @@ async function test(name, fn) {
     const packedHeader = MF.pack7to8(header);
 
     const script = [];
-    // preflight: readSampleHeader (2×, una per writeSample, una dentro readSample)
+    // preflight: readSampleHeader (una sola, per il check dello slot; niente backup corpo)
     script.push(sysex(0, 0x15, []), sysex(0, 0x16, packedHeader));
-    script.push(sysex(0, 0x15, []), sysex(0, 0x16, packedHeader));
-    script.push(sysex(0, 0x15, []), ...partPackets(audio, 0));
-    script.push(sysex(0, 0x15, []), ...partPackets(audio, 4096));
     // alloc: 5D→18, 15→18, 17(header)→16[1], receive non richiesta → 18
     script.push(ack(), ack(), sysex(0, 0x16, [0x01]));
     stub.queueReceive(ack());
@@ -1025,6 +1048,62 @@ async function test(name, fn) {
     // la selezione dello slot avviene sempre, ma il corpo non parte
     assert.ok(stub.calls.some((c) => c.op === 0x5b), 'la selezione dello slot deve avvenire');
     assert.ok(!stub.calls.some((c) => c.op === 0x59), 'dopo la cancellazione non parte il corpo');
+  });
+
+  await test('readSample: sample >128 blocchi (indice mascherato a 7 bit)', async () => {
+    const stub = makeMidiStub();
+    global.Midi = stub.Midi;
+    // 129 blocchi = 528.384 byte (~16,5 s a 32 kHz): l'indice supera 127 e
+    // senza mascheramento il messaggio SysEx sarebbe invalido
+    const BLOCKS = 129;
+    const sizeBytes = BLOCKS * 4096;
+    const header = new Uint8Array(28);
+    header[4] = sizeBytes & 0xff;
+    header[5] = (sizeBytes >> 8) & 0xff;
+    header[6] = (sizeBytes >> 16) & 0xff;
+    header[7] = (sizeBytes >> 24) & 0xff;
+    'BigSample'.split('').forEach((c, i) => { header[10 + i] = c.charCodeAt(0); });
+    const packedHeader = MF.pack7to8(header);
+
+    // dati attesi: ogni blocco ha un pattern diverso
+    const expected = new Uint8Array(sizeBytes);
+    for (let b = 0; b < BLOCKS; b++) {
+      for (let i = 0; i < 4096; i++) expected[b * 4096 + i] = (b * 37 + i * 5) & 0xff;
+    }
+
+    let phase = 'header';
+    let blockIdx = -1;
+    let packetIdx = 0;
+    stub.queueReplies((op) => {
+      if (op === 0x5b) { phase = 'header'; return sysex(0, 0x15, []); }
+      if (op === 0x59) { blockIdx++; packetIdx = 0; phase = 'block'; return sysex(0, 0x15, []); }
+      if (op === 0x18) {
+        if (phase === 'header') return sysex(0, 0x16, packedHeader);
+        const p = packetIdx++;
+        const last = p === 146;
+        const base = blockIdx * 4096 + p * 28;
+        const raw = new Uint8Array(28);
+        const n = last ? 8 : 28;
+        for (let i = 0; i < n; i++) raw[i] = expected[base + i];
+        return sysex(0, last ? 0x17 : 0x16, MF.pack7to8(raw));
+      }
+      throw new Error(`op inattesa 0x${op.toString(16)}`);
+    });
+
+    const s = await MF.readSample(1);
+    assert.strictEqual(s.data.length, sizeBytes);
+    // contenuto corretto anche nell'ultimo blocco (indice mascherato 128 & 0x7f = 0)
+    assert.deepStrictEqual(Array.from(s.data.subarray(0, 64)), Array.from(expected.subarray(0, 64)));
+    assert.deepStrictEqual(
+      Array.from(s.data.subarray(128 * 4096, 128 * 4096 + 64)),
+      Array.from(expected.subarray(128 * 4096, 128 * 4096 + 64))
+    );
+    // tutte le richieste di blocco hanno l'indice entro i 7 bit
+    const blockReqs = stub.calls.filter((c) => c.op === 0x59);
+    assert.strictEqual(blockReqs.length, BLOCKS);
+    assert.ok(blockReqs.every((c) => c.payload[1] >= 0 && c.payload[1] <= 127),
+      'l\'indice di blocco deve stare in 7 bit');
+    assert.strictEqual(blockReqs[128].payload[1], 0); // 128 & 0x7f
   });
 
   await test('renameWavetable: solo header (corpo non toccato)', async () => {
@@ -1204,6 +1283,46 @@ async function test(name, fn) {
     return out;
   };
 
+  /** WAV generico (formato/bit/canali arbitrari) per testare la conversione. */
+  const makeWavEx = ({ rate = 32000, format = 1, bits = 16, values = [], channels = 1 } = {}) => {
+    const bytesPer = bits / 8;
+    const dataLen = values.length * bytesPer;
+    const out = new Uint8Array(44 + dataLen);
+    const dv = new DataView(out.buffer);
+    out.set([0x52, 0x49, 0x46, 0x46], 0);
+    dv.setUint32(4, 36 + dataLen, true);
+    out.set([0x57, 0x41, 0x56, 0x45], 8);
+    out.set([0x66, 0x6d, 0x74, 0x20], 12);
+    dv.setUint32(16, 16, true);
+    dv.setUint16(20, format, true);
+    dv.setUint16(22, channels, true);
+    dv.setUint32(24, rate, true);
+    dv.setUint32(28, rate * channels * bytesPer, true);
+    dv.setUint16(32, channels * bytesPer, true);
+    dv.setUint16(34, bits, true);
+    out.set([0x64, 0x61, 0x74, 0x61], 36);
+    dv.setUint32(40, dataLen, true);
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i];
+      const off = 44 + i * bytesPer;
+      if (format === 3 && bits === 32) dv.setFloat32(off, v, true);
+      else if (format === 3 && bits === 64) dv.setFloat64(off, v, true);
+      else if (bits === 8) out[off] = (Math.round(v) + 128) & 0xff;
+      else if (bits === 16) dv.setInt16(off, v, true);
+      else if (bits === 24) {
+        out[off] = v & 0xff;
+        out[off + 1] = (v >> 8) & 0xff;
+        out[off + 2] = (v >> 16) & 0xff;
+      } else if (bits === 32) dv.setInt32(off, v, true);
+    }
+    return out;
+  };
+
+  const wavS16 = (w) => {
+    const dv = new DataView(w.data.buffer, w.data.byteOffset, w.data.byteLength);
+    return (i) => dv.getInt16(i * 2, true);
+  };
+
   await test('wavToWavetable: WAV mono 32kHz 8192 campioni', () => {
     const pcm = new Uint8Array(16384);
     for (let i = 0; i < 16384; i++) pcm[i] = (i * 5) & 0xff;
@@ -1251,6 +1370,132 @@ async function test(name, fn) {
     assert.deepStrictEqual(Array.from(r3.data), Array.from(rep));
   });
 
+  await test('wavToWavetable: WAV senza campioni → errore (non deve bloccarsi)', () => {
+    // regressione: un WAV con chunk "data" di lunghezza 0 faceva entrare il
+    // riempimento ciclico in un ciclo infinito, bloccando l'app
+    const empty = makeWavEx({ rate: 32000, values: [] });
+    assert.strictEqual(empty.length, 44);
+    assert.throws(() => Mfp.wavToWavetable(empty, 'Empty'), /no audio samples/);
+    // anche un WAV con un solo byte di dati (mezzo campione) non ha campioni
+    const half = makeWav({ rate: 32000, data: new Uint8Array(1) });
+    assert.throws(() => Mfp.wavToWavetable(half, 'Half'), /no audio samples/);
+  });
+
+  await test('parseWav: 32-bit float → PCM16 con scaling e clamp', () => {
+    const wav = makeWavEx({ format: 3, bits: 32, values: [0.5, -1.0, 1.0, 1.5, -1.5, 0.0] });
+    const w = Mfp.parseWav(wav);
+    assert.strictEqual(w.sampleRate, 32000);
+    assert.strictEqual(w.frames, 6);
+    const s = wavS16(w);
+    assert.strictEqual(s(0), 16384);   // 0.5 × 32768
+    assert.strictEqual(s(1), -32768);  // -1.0
+    assert.strictEqual(s(2), 32767);   // 1.0 → clamp 32768 → 32767
+    assert.strictEqual(s(3), 32767);   // 1.5 clamp
+    assert.strictEqual(s(4), -32768);  // -1.5 clamp
+    assert.strictEqual(s(5), 0);
+  });
+
+  await test('parseWav: 64-bit float → PCM16', () => {
+    const wav = makeWavEx({ format: 3, bits: 64, values: [0.25, -0.25] });
+    const s = wavS16(Mfp.parseWav(wav));
+    assert.strictEqual(s(0), 8192);
+    assert.strictEqual(s(1), -8192);
+  });
+
+  await test('parseWav: 24-bit e 32-bit int → PCM16', () => {
+    const w24 = Mfp.parseWav(makeWavEx({ bits: 24, values: [8388607, -8388608, 0, 262144] }));
+    const d24 = new DataView(w24.data.buffer, w24.data.byteOffset, w24.data.byteLength);
+    assert.strictEqual(d24.getInt16(0, true), 32767);   // 8388607 >> 8
+    assert.strictEqual(d24.getInt16(2, true), -32768);  // -8388608 >> 8
+    assert.strictEqual(d24.getInt16(4, true), 0);
+    assert.strictEqual(d24.getInt16(6, true), 1024);    // 262144 >> 8
+    const w32 = Mfp.parseWav(makeWavEx({ bits: 32, values: [2147483647, -2147483648, 65536] }));
+    const d32 = new DataView(w32.data.buffer, w32.data.byteOffset, w32.data.byteLength);
+    assert.strictEqual(d32.getInt16(0, true), 32767);   // >> 16
+    assert.strictEqual(d32.getInt16(2, true), -32768);
+    assert.strictEqual(d32.getInt16(4, true), 1);       // 65536 >> 16
+  });
+
+  await test('parseWav: 8-bit unsigned → PCM16', () => {
+    const w = Mfp.parseWav(makeWavEx({ bits: 8, values: [-128, 0, 127, -64] }));
+    const s = wavS16(w);
+    assert.strictEqual(s(0), -32768); // -128 << 8
+    assert.strictEqual(s(1), 0);
+    assert.strictEqual(s(2), 32512);  // 127 << 8
+    assert.strictEqual(s(3), -16384); // -64 << 8
+  });
+
+  await test('parseWav: stereo → downmix mono (media dei canali)', () => {
+    const wav = makeWavEx({ channels: 2, bits: 16, values: [100, 200, 300, 400, -100, 100] });
+    const w = Mfp.parseWav(wav);
+    assert.strictEqual(w.frames, 3);
+    const s = wavS16(w);
+    assert.strictEqual(s(0), 150); // (100+200)/2
+    assert.strictEqual(s(1), 350); // (300+400)/2
+    assert.strictEqual(s(2), 0);   // (-100+100)/2
+  });
+
+  await test('parseWav: stereo 32-bit float → downmix mono', () => {
+    const wav = makeWavEx({ channels: 2, format: 3, bits: 32, values: [1.0, -1.0, 0.5, 0.5] });
+    const w = Mfp.parseWav(wav);
+    assert.strictEqual(w.frames, 2);
+    const s = wavS16(w);
+    assert.strictEqual(s(0), 0);     // (1 + -1)/2
+    assert.strictEqual(s(1), 16384); // (0.5+0.5)/2 × 32768
+  });
+
+  await test('wavToSample: accetta WAV 32-bit float', () => {
+    const vals = [0.5, -0.5, 0.25, -0.25, 1.0, -1.0, 0.0];
+    const w = Mfp.wavToSample(makeWavEx({ rate: 32000, format: 3, bits: 32, values: vals }), 'F');
+    assert.strictEqual(w.name, 'F');
+    assert.strictEqual(w.data.length, vals.length * 2);
+    const s = wavS16(w);
+    assert.strictEqual(s(0), 16384);
+    assert.strictEqual(s(1), -16384);
+    assert.strictEqual(s(4), 32767);
+    assert.strictEqual(s(5), -32768);
+  });
+
+  await test('wavToWavetable: accetta WAV 24-bit', () => {
+    const vals = [0, 262144, -262144, 8388607];
+    const w = Mfp.wavToWavetable(makeWavEx({ rate: 32000, bits: 24, values: vals }), 'T');
+    assert.strictEqual(w.data.length, 8192 * 2); // riempie fino a 8192 campioni
+    const s = wavS16(w);
+    assert.strictEqual(s(0), 0);
+    assert.strictEqual(s(1), 1024);
+    assert.strictEqual(s(2), -1024);
+    assert.strictEqual(s(3), 32767);
+  });
+
+  await test('resamplePcm16: windowed-sinc a guadagno unitario (DC preservato)', () => {
+    const fromRate = 48000;
+    const toRate = 32000;
+    // DC costante 8000
+    const dc = new Uint8Array(fromRate * 2);
+    for (let i = 0; i < fromRate; i++) {
+      dc[i * 2] = 8000 & 0xff;
+      dc[i * 2 + 1] = (8000 >> 8) & 0xff;
+    }
+    const out = Mfp.resamplePcm16(dc, fromRate, toRate);
+    assert.strictEqual(out.length, toRate * 2);
+    // al centro (lontano dai bordi del filtro) deve restare ~8000
+    const mid = Math.floor(toRate / 2);
+    const got = out[mid * 2] | (out[mid * 2 + 1] << 8);
+    assert.ok(Math.abs(got - 8000) < 64, `DC dovrebbe restare ~8000, got ${got}`);
+    // nessun overshoot/clip
+    for (let i = 0; i < toRate; i++) {
+      const v = out[i * 2] | (out[i * 2 + 1] << 8);
+      assert.ok(v >= 0 && v <= 65535, 'fuori range 16-bit');
+    }
+  });
+
+  await test('parseWav: rifiuta solo i formati davvero non supportati', () => {
+    // PCM 12-bit (non valido)
+    assert.throws(() => Mfp.parseWav(makeWavEx({ format: 1, bits: 12, values: [0] })), /Unsupported WAV sample format/);
+    // float 16-bit (non valido)
+    assert.throws(() => Mfp.parseWav(makeWavEx({ format: 3, bits: 16, values: [0.5] })), /Unsupported WAV sample format/);
+  });
+
   await test('backup completo: round-trip .mfbak (zip)', async () => {
     const presets = [{ slot: 1, name: 'A', category: 3, p1: 0, dataB64: 'QUJD' }];
     const wavetables = [{ slot: 2, name: 'W', dataB64: 'V0FW' }];
@@ -1266,6 +1511,124 @@ async function test(name, fn) {
     assert.deepStrictEqual(parsed.globals, globals);
     // file non valido → errore (zip o formato)
     await assert.rejects(() => Mfp.parseFullBackup(new Uint8Array(64)), /Invalid ZIP archive|Not a ManageFreak/);
+  });
+
+  // ================================================================== VOLUME BATCH
+  console.log('Volume in batch (Params.setFieldValue):');
+
+  const str3 = (s) => [s.charCodeAt(0), s.charCodeAt(1), s.charCodeAt(2)];
+
+  /** Costruisce un corpo preset taggato (4672 byte) dai campi indicati. */
+  function buildTaggedPreset(fields) {
+    const unpacked = new Uint8Array(4088);
+    let pos = 0;
+    let curGroup = null;
+    for (const f of fields) {
+      if (f.group !== curGroup) {
+        if (curGroup === null) {
+          unpacked[pos++] = 0x23;
+          unpacked.set(str3(f.group), pos);
+          pos += 3;
+        } else {
+          unpacked[pos++] = 0x40;
+          unpacked[pos++] = 0x23;
+          unpacked.set(str3(f.group), pos);
+          pos += 3;
+        }
+        curGroup = f.group;
+      }
+      const nameBytes = Array.from(f.name).map((c) => c.charCodeAt(0));
+      unpacked[pos++] = 0x40 + nameBytes.length;
+      unpacked.set(nameBytes, pos);
+      pos += nameBytes.length;
+      unpacked[pos++] = 0x63;
+      unpacked[pos++] = f.meta || 0;
+      unpacked[pos++] = f.raw & 0xff;
+      unpacked[pos++] = (f.raw >> 8) & 0xff;
+    }
+    return Params.pack7to8(unpacked);
+  }
+
+  await test('setFieldValue: cambia Gen.PrstVol e lascia invariato il resto', () => {
+    const body = buildTaggedPreset([
+      { group: 'Gen', name: 'PrstVol', meta: 24, raw: 10000 },
+      { group: 'Gen', name: 'UniSprd', meta: 0, raw: 500 },
+      { group: 'VCO', name: 'Type', meta: 22, raw: 20000 },
+    ]);
+    const newBody = Params.setFieldValue(body, 'Gen.PrstVol', 30000);
+    assert.ok(newBody);
+    assert.strictEqual(newBody.length, 4672);
+    const { fields } = Params.parseStructured(newBody);
+    assert.strictEqual(fields.find((f) => f.key === 'Gen.PrstVol').raw, 30000);
+    assert.strictEqual(fields.find((f) => f.key === 'Gen.UniSprd').raw, 500);
+    assert.strictEqual(fields.find((f) => f.key === 'VCO.Type').raw, 20000);
+    // solo i 2 byte del volume differiscono dal corpo originale
+    let diffs = 0;
+    for (let i = 0; i < 4672; i++) if (body[i] !== newBody[i]) diffs++;
+    assert.strictEqual(diffs, 2);
+  });
+
+  await test('setFieldValue: valore con byte alti (>127) gestisce la bitmap', () => {
+    const body = buildTaggedPreset([{ group: 'Gen', name: 'PrstVol', meta: 24, raw: 0 }]);
+    const newBody = Params.setFieldValue(body, 'Gen.PrstVol', 32767);
+    const { fields } = Params.parseStructured(newBody);
+    assert.strictEqual(fields.find((f) => f.key === 'Gen.PrstVol').raw, 32767);
+    // round-trip pack/unpack stabile
+    const u1 = Params.unpack8to7(newBody);
+    assert.deepStrictEqual(Array.from(Params.unpack8to7(Params.pack7to8(u1))), Array.from(u1));
+  });
+
+  await test('setFieldValue: campo assente o corpo non taggato → null', () => {
+    const body = buildTaggedPreset([{ group: 'Gen', name: 'UniSprd', meta: 0, raw: 1 }]);
+    assert.strictEqual(Params.setFieldValue(body, 'Gen.PrstVol', 100), null);
+    const zeros = new Uint8Array(4672);
+    assert.strictEqual(Params.setFieldValue(zeros, 'Gen.PrstVol', 100), null);
+    assert.strictEqual(Params.setFieldValue(null, 'Gen.PrstVol', 100), null);
+  });
+
+  await test('Gen.Volume NON viene usato come volume (campo costante)', () => {
+    // un preset con solo Gen.Volume (senza Gen.PrstVol) non ha volume editabile
+    const body = buildTaggedPreset([{ group: 'Gen', name: 'Volume', meta: 230, raw: 32766 }]);
+    assert.strictEqual(Params.getFieldValue(body, Params.VOLUME_KEY), null);
+    assert.strictEqual(Params.setFieldValue(body, Params.VOLUME_KEY, 16384), null);
+    // il campo esiste ma è distinto dal volume
+    assert.strictEqual(Params.getFieldValue(body, 'Gen.Volume'), 32766);
+  });
+
+  await test('getFieldValue: legge il valore corrente', () => {
+    const body = buildTaggedPreset([{ group: 'Gen', name: 'PrstVol', meta: 24, raw: 12345 }]);
+    assert.strictEqual(Params.getFieldValue(body, 'Gen.PrstVol'), 12345);
+    assert.strictEqual(Params.getFieldValue(body, 'VCO.Type'), null);
+  });
+
+  await test('volumeDbToRaw / volumeRawToDb: conversione dB come sul MicroFreak', () => {
+    // -12 dB = raw 0, 0 dB = raw 16384 (centro), +12 dB = raw 32767
+    assert.strictEqual(Params.volumeDbToRaw(-12), 0);
+    assert.strictEqual(Params.volumeDbToRaw(12), 32767);
+    assert.strictEqual(Params.volumeDbToRaw(0), 16384);
+    assert.strictEqual(Params.volumeDbToRaw(-20), 0);  // clamp
+    assert.strictEqual(Params.volumeDbToRaw(20), 32767); // clamp
+    assert.strictEqual(Params.volumeRawToDb(0), -12);
+    assert.strictEqual(Params.volumeRawToDb(32767), 12);
+    // 16384 è il raw più vicino a 0 dB (quantizzazione: 0.0004 dB di scarto)
+    assert.ok(Math.abs(Params.volumeRawToDb(16384)) < 0.001);
+    // round-trip a passi interi di dB
+    for (let db = -12; db <= 12; db++) {
+      assert.strictEqual(Math.round(Params.volumeRawToDb(Params.volumeDbToRaw(db))), db);
+    }
+    assert.strictEqual(Params.volumeDbLabel(3), '+3 dB');
+    assert.strictEqual(Params.volumeDbLabel(0), '0 dB');
+    assert.strictEqual(Params.volumeDbLabel(-12), '-12 dB');
+  });
+
+  await test('friendlyValue: Gen.PrstVol mostrato in dB', () => {
+    const body = buildTaggedPreset([{ group: 'Gen', name: 'PrstVol', meta: 24, raw: 16384 }]);
+    const { fields } = Params.parseStructured(body);
+    const vol = fields.find((f) => f.key === 'Gen.PrstVol');
+    assert.strictEqual(Params.friendlyValue(vol).text, '0 dB');
+    const body2 = Params.setFieldValue(body, 'Gen.PrstVol', Params.volumeDbToRaw(6));
+    const vol2 = Params.parseStructured(body2).fields.find((f) => f.key === 'Gen.PrstVol');
+    assert.strictEqual(Params.friendlyValue(vol2).text, '+6 dB');
   });
 
   // ================================================================== FINE

@@ -69,6 +69,33 @@ const MF = (() => {
     return res;
   }
 
+  const isTimeoutErr = (e) => {
+    const m = (e && e.message) || '';
+    return m.includes('timeout') || m.includes('Timeout');
+  };
+
+  /**
+   * Richiesta con retry automatico sui SOLI timeout. Usata per i comandi che
+   * riavviano/resettano uno stream (header, inizio lettura blocco, selezione):
+   * riprovarli è sicuro. Gli errori diversi dal timeout vengono rilanciati
+   * subito. I pacchetti dati (op 0x18/0x16/0x17) NON usano il retry singolo:
+   * il device è già avanzato dopo una risposta persa, quindi si riparte dal
+   * blocco (vedi readSample/readPreset/readWavetable).
+   */
+  async function requestRetry(op, payload, timeoutMs = 2500, attempts = 3) {
+    let lastErr = null;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await request(op, payload, timeoutMs);
+      } catch (e) {
+        lastErr = e;
+        if (!isTimeoutErr(e)) throw e;
+        await sleep(40);
+      }
+    }
+    throw lastErr;
+  }
+
   function decodeHeader(payload, slotOneBased) {
     if (payload.length < HEADER_LEN) throw new Error('Preset header too short');
     let name = '';
@@ -125,7 +152,7 @@ const MF = (() => {
   /** Legge l'header di un preset (slot 1..512). */
   async function readHeader(slot, timeoutMs = 2500) {
     const id0 = slot - 1;
-    const res = await request(0x19, [bankOf(id0), progOf(id0), 0x00], timeoutMs);
+    const res = await requestRetry(0x19, [bankOf(id0), progOf(id0), 0x00], timeoutMs);
     expectReply(res, 0x52, HEADER_LEN, `Header slot ${slot}`);
     return decodeHeader(res.payload, slot);
   }
@@ -163,7 +190,7 @@ const MF = (() => {
    */
   async function readPreset(slot, { onProgress, timeoutMs = 2500 } = {}) {
     const id0 = slot - 1;
-    const headerRes = await request(0x19, [bankOf(id0), progOf(id0), 0x00], timeoutMs);
+    const headerRes = await requestRetry(0x19, [bankOf(id0), progOf(id0), 0x00], timeoutMs);
     expectReply(headerRes, 0x52, HEADER_LEN, `Header slot ${slot}`);
     const header = decodeHeader(headerRes.payload, slot);
 
@@ -174,17 +201,29 @@ const MF = (() => {
 
     await sleep(5); // pausa tra le operazioni (come Elektroid)
 
-    const startRes = await request(0x19, [bankOf(id0), progOf(id0), 0x01], timeoutMs);
-    expectReply(startRes, 0x15, 0, `Start reading slot ${slot}`);
-    await sleep(5);
+    // lettura del corpo con retry a livello di trasferimento: se un pacchetto
+    // va perso si riparte da zero (op 19 sel.1 riavvia lo stream) — mai retry
+    // del singolo 0x18, che farebbe saltare un pacchetto.
+    let data = null;
+    for (let attempt = 0; attempt < 3 && data === null; attempt++) {
+      try {
+        const startRes = await requestRetry(0x19, [bankOf(id0), progOf(id0), 0x01], timeoutMs);
+        expectReply(startRes, 0x15, 0, `Start reading slot ${slot}`);
+        await sleep(5);
 
-    const data = new Uint8Array(DATALEN);
-    for (let i = 0; i < PRESET_PARTS; i++) {
-      const res = await request(0x18, [0x00], timeoutMs);
-      const expectedOp = i === PRESET_PARTS - 1 ? 0x17 : 0x16;
-      expectReply(res, expectedOp, PART_LEN, `Part ${i + 1}/${PRESET_PARTS} slot ${slot}`);
-      data.set(res.payload, i * PART_LEN);
-      if (onProgress) onProgress(i + 1, PRESET_PARTS);
+        const d = new Uint8Array(DATALEN);
+        for (let i = 0; i < PRESET_PARTS; i++) {
+          const res = await request(0x18, [0x00], timeoutMs);
+          const expectedOp = i === PRESET_PARTS - 1 ? 0x17 : 0x16;
+          expectReply(res, expectedOp, PART_LEN, `Part ${i + 1}/${PRESET_PARTS} slot ${slot}`);
+          d.set(res.payload, i * PART_LEN);
+          if (onProgress) onProgress(i + 1, PRESET_PARTS);
+        }
+        data = d;
+      } catch (e) {
+        if (attempt === 2 || !isTimeoutErr(e)) throw e;
+        await sleep(60);
+      }
     }
     await sleep(20); // pausa dopo un trasferimento completo
     return { ...header, data };
@@ -568,12 +607,13 @@ const MF = (() => {
     await sleep(5);
   }
 
-  async function uploadWavetableParts(slot, pcm16le, { onPart } = {}) {
+  async function uploadWavetableParts(slot, pcm16le, { onPart, shouldCancel } = {}) {
     if (!pcm16le || pcm16le.length !== WAVE_PCM_BYTES) {
       throw new Error(`Wavetable must be ${WAVE_PCM_BYTES} bytes`);
     }
     const id0 = slot - 1;
     for (let part = 0; part < WAVE_PARTS; part++) {
+      if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
       let res = await request(0x54, [id0, part, 1]);
       expectReply(res, 0x18, 0, `Wavetable part start ${part}`);
       await sleep(5);
@@ -582,6 +622,7 @@ const MF = (() => {
       await sleep(5);
       const partData = pcm16le.subarray(part * WAVE_PART_BYTES, (part + 1) * WAVE_PART_BYTES);
       for (let packet = 0; packet < WAVE_PACKETS_PER_PART; packet++) {
+        if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
         const off = packet * 28;
         let raw;
         if (packet === WAVE_PACKETS_PER_PART - 1) {
@@ -601,18 +642,32 @@ const MF = (() => {
 
   async function readWavetableHeader(slot, timeoutMs = 2500) {
     const id0 = slot - 1;
-    let res = await request(0x57, [id0, 0, 0], timeoutMs);
-    expectReply(res, 0x15, 0, `Wavetable header slot ${slot}`);
-    await sleep(2);
-    res = await request(0x18, [0x01], timeoutMs);
-    expectReply(res, 0x16, 32, `Wavetable header packet slot ${slot}`);
-    const header = unpack8to7(res.payload);
-    return {
-      slot,
-      name: asciiName(header, 12, 28),
-      empty: !!(header[3] & 0x08),
-      raw: Uint8Array.from(header),
-    };
+    // In caso di timeout si riparte dall'INTERA sequenza (op 57 riazzera lo
+    // stream): riprovare il solo pacchetto 0x18 chiederebbe il pacchetto
+    // successivo, che qui non esiste, con il rischio di leggere dati di
+    // un'altra operazione (header sbagliato).
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await request(0x57, [id0, 0, 0], timeoutMs);
+        expectReply(res, 0x15, 0, `Wavetable header slot ${slot}`);
+        await sleep(2);
+        const p = await request(0x18, [0x01], timeoutMs);
+        expectReply(p, 0x16, 32, `Wavetable header packet slot ${slot}`);
+        const header = unpack8to7(p.payload);
+        return {
+          slot,
+          name: asciiName(header, 12, 28),
+          empty: !!(header[3] & 0x08),
+          raw: Uint8Array.from(header),
+        };
+      } catch (e) {
+        lastErr = e;
+        if (!isTimeoutErr(e)) throw e;
+        await sleep(50);
+      }
+    }
+    throw lastErr;
   }
 
   async function readWavetable(slot, { onProgress, timeoutMs = 2500, shouldCancel } = {}) {
@@ -620,24 +675,36 @@ const MF = (() => {
     const header = await readWavetableHeader(slot, timeoutMs);
     if (header.empty) return { ...header, data: null };
     const id0 = slot - 1;
-    const data = new Uint8Array(WAVE_PCM_BYTES);
-    for (let part = 0; part < WAVE_PARTS; part++) {
-      if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
-      const res = await request(0x55, [id0, part, 0], timeoutMs);
-      expectReply(res, 0x15, 0, `Wavetable part ${part} slot ${slot}`);
-      await sleep(2);
-      for (let packet = 0; packet < WAVE_PACKETS_PER_PART; packet++) {
-        if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
-        const p = await request(0x18, [0x00], timeoutMs);
-        const expectedOp = packet === WAVE_PACKETS_PER_PART - 1 ? 0x17 : 0x16;
-        expectReply(p, expectedOp, 32, `Wavetable packet ${part}/${packet} slot ${slot}`);
-        const raw = unpack8to7(p.payload);
-        const useful = packet === WAVE_PACKETS_PER_PART - 1 ? raw.subarray(0, 8) : raw;
-        data.set(useful, part * WAVE_PART_BYTES + packet * 28);
+
+    // ripartenza completa su timeout: op 57 resetta lo stream, poi si leggono
+    // di nuovo tutte le parti da capo (nessun retry dei singoli pacchetti)
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (attempt > 0) await readWavetableHeader(slot, timeoutMs);
+        const data = new Uint8Array(WAVE_PCM_BYTES);
+        for (let part = 0; part < WAVE_PARTS; part++) {
+          if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
+          const res = await request(0x55, [id0, part, 0], timeoutMs);
+          expectReply(res, 0x15, 0, `Wavetable part ${part} slot ${slot}`);
+          await sleep(2);
+          for (let packet = 0; packet < WAVE_PACKETS_PER_PART; packet++) {
+            if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
+            const p = await request(0x18, [0x00], timeoutMs);
+            const expectedOp = packet === WAVE_PACKETS_PER_PART - 1 ? 0x17 : 0x16;
+            expectReply(p, expectedOp, 32, `Wavetable packet ${part}/${packet} slot ${slot}`);
+            const raw = unpack8to7(p.payload);
+            const useful = packet === WAVE_PACKETS_PER_PART - 1 ? raw.subarray(0, 8) : raw;
+            data.set(useful, part * WAVE_PART_BYTES + packet * 28);
+          }
+          if (onProgress) onProgress(part + 1, WAVE_PARTS);
+        }
+        return { ...header, data };
+      } catch (e) {
+        if (attempt === 2 || !isTimeoutErr(e)) throw e;
+        await sleep(80);
       }
-      if (onProgress) onProgress(part + 1, WAVE_PARTS);
     }
-    return { ...header, data };
+    throw new Error(`Wavetable read failed after 3 attempts (slot ${slot})`);
   }
 
   async function restoreWavetable(slot, before) {
@@ -654,16 +721,19 @@ const MF = (() => {
   }
 
   /** Upload guardato con backup + verifica readback + rollback automatico. */
-  async function writeWavetable(slot, { name, data }, { onProgress } = {}) {
+  async function writeWavetable(slot, { name, data }, { onProgress, shouldCancel } = {}) {
     const report = (f, l) => { if (onProgress) onProgress(f, l); };
+    const stop = () => { if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled'); };
     report(0.02, 'Reading current slot…');
     const beforeHeader = await readWavetableHeader(slot);
-    const before = beforeHeader.empty ? null : await readWavetable(slot);
-    report(0.08, 'Uploading wavetable…');
+    const before = beforeHeader.empty ? null : await readWavetable(slot, { shouldCancel });
+    stop();
+    report(0.08, 'Writing wavetable…');
     try {
       await setWavetableEntry(slot, name);
       await uploadWavetableParts(slot, data, {
         onPart: (i, t) => report(0.1 + (i / t) * 0.8, `Wavetable part ${i}/${t}`),
+        shouldCancel,
       });
     } catch (e) {
       if (!(await restoreWavetable(slot, before))) {
@@ -671,8 +741,9 @@ const MF = (() => {
       }
       throw e;
     }
+    stop();
     report(0.92, 'Verifying…');
-    const readback = await readWavetable(slot);
+    const readback = await readWavetable(slot, { shouldCancel });
     if (!readback.data || !bytesEqual(readback.data, data)) {
       if (!(await restoreWavetable(slot, before))) {
         throw new Error('Wavetable readback mismatch and restore failed');
@@ -762,23 +833,35 @@ const MF = (() => {
 
   async function readSampleHeader(slot, timeoutMs = 2500) {
     const id0 = slot - 1;
-    let res = await request(0x5b, [id0, 0, 0], timeoutMs);
-    expectReply(res, 0x15, 0, `Sample header slot ${slot}`);
-    await sleep(2);
-    res = await request(0x18, [0x00], timeoutMs);
-    expectReply(res, 0x16, 32, `Sample header packet slot ${slot}`);
-    const header = unpack8to7(res.payload);
-    const size = le32(header, 4);
-    return {
-      slot,
-      name: asciiName(header, 10, 23),
-      address: le32(header, 0),
-      sizeBytes: size,
-      checksum: le16(header, 8),
-      deviceId: header[23],
-      empty: size === 0,
-      raw: Uint8Array.from(header),
-    };
+    // come per la wavetable: su timeout si riparte dalla sequenza completa
+    // (op 5B riseleziona lo slot e riazzera lo stream), mai dal solo 0x18
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await request(0x5b, [id0, 0, 0], timeoutMs);
+        expectReply(res, 0x15, 0, `Sample header slot ${slot}`);
+        await sleep(2);
+        const p = await request(0x18, [0x00], timeoutMs);
+        expectReply(p, 0x16, 32, `Sample header packet slot ${slot}`);
+        const header = unpack8to7(p.payload);
+        const size = le32(header, 4);
+        return {
+          slot,
+          name: asciiName(header, 10, 23),
+          address: le32(header, 0),
+          sizeBytes: size,
+          checksum: le16(header, 8),
+          deviceId: header[23],
+          empty: size === 0,
+          raw: Uint8Array.from(header),
+        };
+      } catch (e) {
+        lastErr = e;
+        if (!isTimeoutErr(e)) throw e;
+        await sleep(50);
+      }
+    }
+    throw lastErr;
   }
 
   async function readSample(slot, { onProgress, timeoutMs = 2500, shouldCancel } = {}) {
@@ -788,27 +871,46 @@ const MF = (() => {
     if (header.empty) return { ...header, data: null };
     const id0 = slot - 1;
     const partCount = Math.ceil(header.sizeBytes / SAMPLE_PART_BYTES);
-    const out = [];
-    for (let part = 0; part < partCount; part++) {
-      if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
-      const res = await request(0x59, [id0, part], timeoutMs);
-      expectReply(res, 0x15, 0, `Sample block ${part} slot ${slot}`);
-      await sleep(2);
-      for (let packet = 0; packet < SAMPLE_PACKETS_PER_PART; packet++) {
-        if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
-        const p = await request(0x18, [0x00], timeoutMs);
-        const expectedOp = packet === SAMPLE_PACKETS_PER_PART - 1 ? 0x17 : 0x16;
-        expectReply(p, expectedOp, 32, `Sample packet ${part}/${packet} slot ${slot}`);
-        const raw = unpack8to7(p.payload);
-        if (packet === SAMPLE_PACKETS_PER_PART - 1) {
-          for (let i = 0; i < 8; i++) out.push(raw[i]);
-        } else {
-          for (let i = 0; i < 28; i++) out.push(raw[i]);
+
+    // Ogni tentativo ri-seleziona lo slot (op 5B resetta lo stream) e legge
+    // TUTTI i blocchi da capo: se un pacchetto va perso (MIDI instabile), la
+    // posizione dello stream non è più affidabile, quindi si riparte da zero.
+    // Niente retry del singolo 0x18 o del singolo op 59 (il device potrebbe
+    // essere già avanzato: i dati risulterebbero spostati → readback mismatch).
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (attempt > 0) await readSampleHeader(slot, timeoutMs); // reset stream
+        const out = [];
+        for (let part = 0; part < partCount; part++) {
+          if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
+          // L'indice di blocco DEVE stare in 7 bit: i messaggi SysEx non
+          // ammettono byte > 127 (un sample > ~8,2 s supera i 128 blocchi e
+          // farebbe fallire l'invio). Il device legge i blocchi in sequenza e
+          // ignora il valore, quindi si maschera a 7 bit senza perdere nulla.
+          const res = await request(0x59, [id0, part & 0x7f], timeoutMs);
+          expectReply(res, 0x15, 0, `Sample block ${part} slot ${slot}`);
+          await sleep(2);
+          for (let packet = 0; packet < SAMPLE_PACKETS_PER_PART; packet++) {
+            if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
+            const p = await request(0x18, [0x00], timeoutMs);
+            const expectedOp = packet === SAMPLE_PACKETS_PER_PART - 1 ? 0x17 : 0x16;
+            expectReply(p, expectedOp, 32, `Sample packet ${part}/${packet} slot ${slot}`);
+            const raw = unpack8to7(p.payload);
+            if (packet === SAMPLE_PACKETS_PER_PART - 1) {
+              for (let i = 0; i < 8; i++) out.push(raw[i]);
+            } else {
+              for (let i = 0; i < 28; i++) out.push(raw[i]);
+            }
+          }
+          if (onProgress) onProgress(part + 1, partCount);
         }
+        return { ...header, data: Uint8Array.from(out).subarray(0, header.sizeBytes) };
+      } catch (e) {
+        if (attempt === 2 || !isTimeoutErr(e)) throw e;
+        await sleep(80); // riparte da zero con stream resettato
       }
-      if (onProgress) onProgress(part + 1, partCount);
     }
-    return { ...header, data: Uint8Array.from(out).subarray(0, header.sizeBytes) };
+    throw new Error(`Sample read failed after 3 attempts (slot ${slot})`);
   }
 
   /** Statistiche memoria sample: op 47/48 (envelope alternativa). */
@@ -838,10 +940,11 @@ const MF = (() => {
     }
   }
 
-  async function uploadSampleParts(slot, audio, { onPart } = {}) {
+  async function uploadSampleParts(slot, audio, { onPart, shouldCancel } = {}) {
     const id0 = slot - 1;
     const partCount = Math.ceil(audio.length / SAMPLE_PART_BYTES);
     for (let part = 0; part < partCount; part++) {
+      if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
       let res = await request(0x58, [id0, 0, 1]);
       expectReply(res, 0x18, 0, `Sample block start ${part}`);
       await sleep(5);
@@ -851,6 +954,9 @@ const MF = (() => {
       const partData = new Uint8Array(SAMPLE_PART_BYTES);
       partData.set(audio.subarray(part * SAMPLE_PART_BYTES, (part + 1) * SAMPLE_PART_BYTES));
       for (let packet = 0; packet < SAMPLE_PACKETS_PER_PART; packet++) {
+        // annullamento reattivo: senza questo controllo un Cancel premuto
+        // durante un sample lungo non aveva effetto fino alla fine del sample
+        if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
         const off = packet * 28;
         let raw;
         if (packet === SAMPLE_PACKETS_PER_PART - 1) {
@@ -868,7 +974,7 @@ const MF = (() => {
     }
   }
 
-  async function uploadSample(slot, name, audio, { onPart } = {}) {
+  async function uploadSample(slot, name, audio, { onPart, shouldCancel } = {}) {
     if (!audio || audio.length < 2 || audio.length > SAMPLE_MAX_BYTES) {
       throw new Error(`Sample PCM must be 2..${SAMPLE_MAX_BYTES} bytes`);
     }
@@ -888,11 +994,14 @@ const MF = (() => {
     if (res.payload[0] !== 0x01) {
       throw new Error('Sample allocation refused (insufficient contiguous space)');
     }
-    // seconda risposta non richiesta: completamento allocazione
-    const completionMsg = await Midi.receiveSysex(3000);
-    const completion = parseReply(completionMsg);
-    if (completion.op !== 0x18 || completion.payload.length !== 0) {
-      throw new Error('Unexpected sample allocation completion reply');
+    // seconda risposta di completamento allocazione: va CONSUMATA con un timeout
+    // generoso, qualunque contenuto abbia. Se la lasciamo in coda, desincronizza
+    // il reset 5A successivo e i dati scritti risultano sbagliati.
+    try {
+      const completionMsg = await Midi.receiveSysex(3000);
+      parseReply(completionMsg); // consuma e ignora il contenuto
+    } catch {
+      /* nessuna risposta di completamento: ok su alcuni firmware */
     }
     await sleep(5);
 
@@ -900,83 +1009,129 @@ const MF = (() => {
     await resetSampleHeader(slot, header);
 
     // 3. trasferimento dei blocchi
-    await uploadSampleParts(slot, audio, { onPart });
+    await uploadSampleParts(slot, audio, { onPart, shouldCancel });
 
-    // 4. passaggio di stream post-upload (flusso ufficiale MCC)
-    res = await request(0x5b, [id0, 0, 1]);
-    expectReply(res, 0x15, 0, `Sample finalize slot ${slot}`);
-    await sleep(5);
-    for (let packet = 0; packet < SAMPLE_PACKETS_PER_PART; packet++) {
-      const p = await request(0x18, [0x00]);
-      const expectedOp = packet === SAMPLE_PACKETS_PER_PART - 1 ? 0x17 : 0x16;
-      expectReply(p, expectedOp, 32, `Sample finalize packet ${packet}`);
-      await sleep(5);
+    // 4. passaggio di stream post-upload (flusso ufficiale MCC) — con retry
+    //    del flusso completo se un pacchetto va perso
+    let finalized = false;
+    for (let attempt = 0; attempt < 3 && !finalized; attempt++) {
+      if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled');
+      try {
+        res = await requestRetry(0x5b, [id0, 0, 1]);
+        expectReply(res, 0x15, 0, `Sample finalize slot ${slot}`);
+        await sleep(5);
+        for (let packet = 0; packet < SAMPLE_PACKETS_PER_PART; packet++) {
+          const p = await request(0x18, [0x00]);
+          const expectedOp = packet === SAMPLE_PACKETS_PER_PART - 1 ? 0x17 : 0x16;
+          expectReply(p, expectedOp, 32, `Sample finalize packet ${packet}`);
+          await sleep(5);
+        }
+        finalized = true;
+      } catch (e) {
+        if (attempt === 2 || !isTimeoutErr(e)) throw e;
+        await sleep(60);
+      }
     }
   }
 
-  async function restoreSample(slot, before) {
-    if (!before || !before.data) {
-      await resetSampleHeader(slot, sampleHeaderBytes(slot, '', null, { empty: true }));
-      return (await readSampleHeader(slot)).empty;
+  /** Reset robusto di uno slot sample (header a lunghezza zero), con retry.
+   *  Ripulisce la directory anche se il device è momentaneamente instabile. */
+  async function hardResetSampleSlot(slot) {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        await resetSampleHeader(slot, sampleHeaderBytes(slot, '', null, { empty: true }));
+        await sleep(30);
+        return true;
+      } catch {
+        await sleep(150);
+      }
     }
-    await uploadSample(slot, before.name, before.data);
-    const rb = await readSample(slot);
-    return !!(rb.data && bytesEqual(rb.data, before.data));
+    return false;
   }
 
-  /** Upload guardato con backup, verifica readback e rollback automatico. */
-  async function writeSample(slot, name, audio, { onProgress } = {}) {
+  /** Scrittura sample con verifica readback. Non fa il backup del corpo
+   *  (una lettura su slot corrotto bloccherebbe il device): se la scrittura o
+   *  la verifica falliscono, lo slot viene svuotato con un HARD RESET, così
+   *  non resta mai uno slot corrotto. */
+  async function writeSample(slot, name, audio, { onProgress, shouldCancel } = {}) {
     const report = (f, l) => { if (onProgress) onProgress(f, l); };
-    report(0.02, 'Reading current slot…');
-    const beforeHeader = await readSampleHeader(slot);
-    const before = beforeHeader.empty ? null : await readSample(slot);
+    const stop = () => { if (shouldCancel && shouldCancel()) throw new Error('Operation cancelled'); };
+    report(0.02, 'Checking slot…');
+    await readSampleHeader(slot); // controllo che lo slot risponda prima di scrivere
+    stop();
     report(0.07, 'Checking sample memory…');
     const stats = await readSampleStats();
     const padded = Math.ceil(audio.length / SAMPLE_PART_BYTES) * SAMPLE_PART_BYTES;
     if (padded > stats.freeBytes) {
       throw new Error('Not enough free sample memory for this upload');
     }
-    report(0.1, 'Uploading sample…');
+    report(0.1, 'Writing sample…');
     try {
       await uploadSample(slot, name, audio, {
         onPart: (i, t) => report(0.1 + (i / t) * 0.8, `Sample block ${i}/${t}`),
+        shouldCancel,
       });
     } catch (e) {
-      if (!(await restoreSample(slot, before))) {
-        throw new Error(`Sample write failed and restore failed (${e.message})`);
+      // HARD RESET: qualunque cosa sia successa, lo slot deve finire pulito
+      const resetOk = await hardResetSampleSlot(slot);
+      if (!resetOk) {
+        throw new Error(`Sample write failed and slot reset failed (${e.message})`);
       }
       throw e;
     }
+    stop();
     report(0.92, 'Verifying…');
-    const readback = await readSample(slot);
-    if (!readback.data || !bytesEqual(readback.data, audio)) {
-      if (!(await restoreSample(slot, before))) {
-        throw new Error('Sample readback mismatch and restore failed');
+    const readback = await readSample(slot, { shouldCancel });
+    // Il MicroFreak azzera gli ultimi byte di un sample in memoria (granularità
+    // interna): la coda può risultare 0x00 anche se noi avevamo inviato dati.
+    // La tolleranza è di 512 byte (256 campioni ≈ 8 ms a 32 kHz) e vale SOLO se
+    // quei byte sono identici a quanto inviato oppure azzerati: qualunque altro
+    // valore è una corruzione vera e fa fallire la verifica.
+    const TAIL_TOLERANCE = 512;
+    const strictLen = audio.length > TAIL_TOLERANCE ? audio.length - TAIL_TOLERANCE : audio.length;
+    let rbOk = !!(readback.data && readback.data.length >= audio.length &&
+      bytesEqual(readback.data.subarray(0, strictLen), audio.subarray(0, strictLen)));
+    if (rbOk) {
+      for (let i = strictLen; i < audio.length; i++) {
+        const got = readback.data[i];
+        if (got !== audio[i] && got !== 0) { rbOk = false; break; }
       }
-      throw new Error('Sample readback mismatch; original restored');
+    }
+    if (!rbOk) {
+      let diag;
+      if (!readback.data) {
+        diag = 'no data read back';
+      } else if (readback.data.length !== audio.length) {
+        diag = `size differs (sent ${audio.length} bytes, read ${readback.data.length})`;
+      } else {
+        // stesso numero di byte ma contenuto diverso: trova il primo offset
+        let off = -1;
+        for (let i = 0; i < audio.length; i++) {
+          if (readback.data[i] !== audio[i]) { off = i; break; }
+        }
+        diag = off >= 0
+          ? `content differs at byte ${off} (sent 0x${audio[off].toString(16).padStart(2, '0')}, read 0x${readback.data[off].toString(16).padStart(2, '0')})`
+          : 'content differs (unknown offset)';
+      }
+      // HARD RESET: mai lasciare uno slot corrotto dopo un mismatch
+      const resetOk = await hardResetSampleSlot(slot);
+      if (!resetOk) {
+        throw new Error(`Sample readback mismatch and slot reset failed (${diag})`);
+      }
+      throw new Error(`Sample readback mismatch (${diag}); slot reset to empty`);
     }
     report(1, 'Done');
     return true;
   }
 
-  /** Svuota uno slot sample (header di lunghezza zero). */
+  /** Svuota uno slot sample (header di lunghezza zero).
+   *  Come MCC, esegue il reset della directory direttamente (op 5A), SENZA
+   *  leggere prima il corpo: su uno slot corrotto una lettura andrebbe in
+   *  timeout e lascerebbe il device bloccato. La pulizia è quindi immediata. */
   async function clearSample(slot) {
-    const beforeHeader = await readSampleHeader(slot);
-    if (beforeHeader.empty) return true;
-    const before = await readSample(slot);
-    try {
-      await resetSampleHeader(slot, sampleHeaderBytes(slot, '', null, { empty: true }));
-    } catch (e) {
-      if (!(await restoreSample(slot, before))) {
-        throw new Error(`Sample clear failed and restore failed (${e.message})`);
-      }
-      throw e;
-    }
+    await resetSampleHeader(slot, sampleHeaderBytes(slot, '', null, { empty: true }));
     const h = await readSampleHeader(slot);
-    if (!h.empty) {
-      await restoreSample(slot, before);
-      throw new Error('Sample clear verification failed; original restored');
-    }
+    if (!h.empty) throw new Error('Sample clear verification failed');
     return true;
   }
 

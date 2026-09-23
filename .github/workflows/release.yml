@@ -14,7 +14,8 @@ jobs:
           - os: windows-latest
             args: --win
           - os: macos-latest
-            args: --mac
+            # entrambe le architetture: un dmg arm64-only non parte sui Mac Intel
+            args: --mac --x64 --arm64
           - os: ubuntu-latest
             args: --linux
     runs-on: ${{ matrix.os }}
@@ -34,8 +35,28 @@ jobs:
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Check that the tag matches the app version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(node -p "require('./app/package.json').version")
+          echo "tag: $GITHUB_REF_NAME -> $TAG | app/package.json: $PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Il tag $GITHUB_REF_NAME non corrisponde alla versione $PKG in app/package.json"
+            exit 1
+          fi
+      - name: Run tests
+        run: npm test
+        working-directory: app
+      - name: Check native MIDI module loads
+        # il modulo nativo (RtMidi) deve caricarsi sul sistema che compila: se il
+        # binario precompilato manca, meglio saperlo qui che a release pubblicata
+        run: node -e "const m=require('@julusian/midi'); const i=new m.Input(); const o=new m.Output(); console.log('RtMidi ok -', i.getPortCount(), 'in /', o.getPortCount(), 'out');"
+        working-directory: app
       - name: Build installers
-        run: npx electron-builder ${{ matrix.args }}
+        # --publish never: gli artefatti (compreso latest.yml) li pubblica il job "release",
+        # così la release non viene creata due volte
+        run: npx electron-builder ${{ matrix.args }} --publish never
         working-directory: app
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -47,6 +68,7 @@ jobs:
             app/dist/*.deb
             app/dist/*.dmg
             app/dist/*.zip
+            app/dist/latest*.yml
           if-no-files-found: error
 
   release:

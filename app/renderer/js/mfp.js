@@ -580,28 +580,96 @@ const Mfp = (() => {
       p = bodyStart + size + (size & 1);
     }
     if (!fmt || !dataChunk) throw new Error('WAV missing fmt/data chunk');
-    if (fmt.format !== 1) throw new Error('WAV must be uncompressed PCM');
-    if (fmt.bitsPerSample !== 16) throw new Error('WAV must be 16-bit');
-    if (fmt.channels !== 1) throw new Error('WAV must be mono');
-    const frames = Math.floor(dataChunk.length / (fmt.channels * fmt.bitsPerSample / 8));
-    return { sampleRate: fmt.sampleRate, data: dataChunk.subarray(0, frames * 2), frames };
+    if (fmt.format !== 1 && fmt.format !== 3) {
+      throw new Error(`WAV must be uncompressed PCM or IEEE float (got format ${fmt.format})`);
+    }
+
+    const bits = fmt.bitsPerSample;
+    const pcmOk = fmt.format === 1 && [8, 16, 24, 32].includes(bits);
+    const floatOk = fmt.format === 3 && [32, 64].includes(bits);
+    if (!pcmOk && !floatOk) {
+      throw new Error(`Unsupported WAV sample format: ${fmt.format === 3 ? 'float' : 'PCM'} ${bits}-bit`);
+    }
+
+    // conversione automatica → PCM16 LE mono (il formato nativo del MicroFreak):
+    // - multicanale → mono con media dei canali (downmix)
+    // - 8/24/32-bit PCM → 16-bit
+    // - IEEE float 32/64 → 16-bit (scaling ×32768 + clamp)
+    const bytesPerSample = bits / 8;
+    const channels = fmt.channels;
+    if (!channels || channels < 1) throw new Error('WAV has no audio channels');
+    const frames = Math.floor(dataChunk.length / (channels * bytesPerSample));
+    const out = new Uint8Array(frames * 2);
+    const ddv = new DataView(dataChunk.buffer, dataChunk.byteOffset, dataChunk.byteLength);
+    const clamp16 = (v) => Math.max(-32768, Math.min(32767, Math.round(v)));
+    const readCh = (frame, ch) => {
+      const off = (frame * channels + ch) * bytesPerSample;
+      if (fmt.format === 3) {
+        return bits === 64 ? ddv.getFloat64(off, true) : ddv.getFloat32(off, true);
+      }
+      if (bits === 8) return (ddv.getUint8(off) - 128) << 8;
+      if (bits === 16) return ddv.getInt16(off, true);
+      if (bits === 24) {
+        const b0 = ddv.getUint8(off);
+        const b1 = ddv.getUint8(off + 1);
+        const b2 = ddv.getUint8(off + 2);
+        let v = b0 | (b1 << 8) | (b2 << 16);
+        if (b2 & 0x80) v |= 0xff000000;
+        return v >> 8;
+      }
+      return ddv.getInt32(off, true) >> 16;
+    };
+    for (let frame = 0; frame < frames; frame++) {
+      let sum = 0;
+      for (let ch = 0; ch < channels; ch++) sum += readCh(frame, ch);
+      const s = fmt.format === 3
+        ? clamp16((sum / channels) * 32768)
+        : clamp16(sum / channels);
+      out[frame * 2] = s & 0xff;
+      out[frame * 2 + 1] = (s >> 8) & 0xff;
+    }
+    return { sampleRate: fmt.sampleRate, data: out, frames };
   }
 
-  /** Risampla linearmente PCM16 mono verso una frequenza target. */
+  /** Risampla PCM16 mono verso una frequenza target con filtro windowed-sinc
+   *  (anti-aliasing): l'interpolazione lineare, riducendo la frequenza,
+   *  ripiegava le alte frequenze e rendeva il suono "fuzzy"/metallico. */
   function resamplePcm16(data, fromRate, toRate) {
     if (fromRate === toRate) return data;
-    const outLen = Math.floor((data.length / 2) * toRate / fromRate) * 2;
-    const out = new Uint8Array(outLen);
-    for (let i = 0; i < outLen / 2; i++) {
-      const pos = (i * fromRate) / toRate;
-      const i0 = Math.floor(pos);
-      const i1 = Math.min(i0 + 1, data.length / 2 - 1);
-      const frac = pos - i0;
-      const s0 = data[i0 * 2] | (data[i0 * 2 + 1] << 8);
-      const s1 = data[i1 * 2] | (data[i1 * 2 + 1] << 8);
-      const s = (s0 + (s1 - s0) * frac) | 0;
-      out[i * 2] = s & 0xff;
-      out[i * 2 + 1] = (s >> 8) & 0xff;
+    const inLen = data.length / 2;
+    const outLen = Math.floor((inLen * toRate) / fromRate);
+    const out = new Uint8Array(outLen * 2);
+    const step = fromRate / toRate; // campioni sorgente per campione output
+    // cutoff relativo alla Nyquist sorgente: per downsampling < 1 (anti-alias)
+    const cutoff = Math.min(1.0, toRate / fromRate);
+    const TAPS = 48;
+    const half = TAPS / 2;
+    const win = new Float64Array(TAPS);
+    for (let n = 0; n < TAPS; n++) {
+      win[n] = 0.42 - 0.5 * Math.cos((2 * Math.PI * n) / (TAPS - 1)) +
+        0.08 * Math.cos((4 * Math.PI * n) / (TAPS - 1));
+    }
+    const sinc = (x) => (x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x));
+    for (let i = 0; i < outLen; i++) {
+      const pos = i * step;
+      const center = Math.floor(pos);
+      let acc = 0;
+      let wsum = 0;
+      for (let k = -half + 1; k <= half; k++) {
+        const idx = center + k;
+        if (idx < 0 || idx >= inLen) continue;
+        const x = pos - idx;
+        const w = sinc(x * cutoff) * win[k + half - 1];
+        wsum += w;
+        let s = data[idx * 2] | (data[idx * 2 + 1] << 8);
+        if (s >= 0x8000) s -= 0x10000;
+        acc += s * w;
+      }
+      let v = wsum !== 0 ? Math.round(acc / wsum) : 0;
+      if (v < -32768) v = -32768;
+      if (v > 32767) v = 32767;
+      out[i * 2] = v & 0xff;
+      out[i * 2 + 1] = (v >> 8) & 0xff;
     }
     return out;
   }
@@ -615,6 +683,9 @@ const Mfp = (() => {
     if (curFrames > targetFrames) {
       data = data.subarray(0, targetFrames * 2);
     } else if (curFrames < targetFrames) {
+      // un WAV con chunk "data" vuoto (o troppo corto) non ha campioni: senza
+      // questa guardia il ciclo sotto non avanzerebbe mai (blocco dell'app)
+      if (curFrames === 0) throw new Error('WAV contains no audio samples');
       // ripete ciclicamente il materiale fino a riempire 8192 campioni
       const out = new Uint8Array(targetFrames * 2);
       let off = 0;
