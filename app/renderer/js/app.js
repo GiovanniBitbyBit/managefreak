@@ -113,6 +113,10 @@ const App = (() => {
     appMenuVersion: $('app-menu-version'),
     appMenuChangelog: $('app-menu-changelog'),
     btnCheckUpdates: $('btn-check-updates'),
+    zoomLabel: $('zoom-label'),
+    btnZoomIn: $('btn-zoom-in'),
+    btnZoomOut: $('btn-zoom-out'),
+    btnZoomReset: $('btn-zoom-reset'),
     toast: $('toast'),
   };
 
@@ -254,6 +258,95 @@ const App = (() => {
     el.btnTheme.textContent = light ? '☀️' : '🌙';
     el.btnTheme.title = light ? 'Switch to dark theme' : 'Switch to light theme';
     try { localStorage.setItem('managefreak-theme', light ? 'light' : 'dark'); } catch { /* ignora */ }
+  }
+
+  // ------------------------------------------------------------------ zoom UI
+  // Sui portatili 13-14" (o con la scala di Windows alta) l'interfaccia al 100%
+  // risulta grande: si può rimpicciolire con Ctrl +/-, Ctrl + rotellina oppure
+  // con i comandi nel menu in alto a sinistra. La scelta viene ricordata.
+  const ZOOM_MIN = 0.7;
+  const ZOOM_MAX = 1.5;
+  const ZOOM_STEP = 0.1;
+  const ZOOM_KEY = 'managefreak-zoom';
+  let zoomNow = 1;
+  let zoomRedrawTimer = null;
+
+  const clampZoom = (v) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(v * 100) / 100));
+  const currentZoom = () => zoomNow;
+
+  /** Primo avvio: su schermi piccoli si parte già rimpiccioliti. */
+  function defaultZoomForScreen() {
+    const w = (window.screen && window.screen.availWidth) || 1920;
+    const h = (window.screen && window.screen.availHeight) || 1080;
+    return w <= 1440 || h <= 860 ? 0.85 : 1;
+  }
+
+  /** Le anteprime su canvas sono bitmap: a zoom diverso vanno ridisegnate. */
+  function redrawPreviewAfterZoom() {
+    if (zoomRedrawTimer) clearTimeout(zoomRedrawTimer);
+    zoomRedrawTimer = setTimeout(() => {
+      try {
+        const last = state.wtLastRender;
+        if (last && last.data) showWtDetail({ data: last.data, name: last.name, slot: last.slot, libId: last.libId, source: last.source });
+      } catch { /* anteprima non ridisegnabile: nessun problema */ }
+    }, 180);
+  }
+
+  /**
+   * Applica lo zoom dell'interfaccia tramite la variabile CSS --ui-zoom, che
+   * scala layout e disegno insieme (il CSS compensa le unità di viewport, così
+   * la pagina continua a riempire la finestra). Lo zoom di pagina di Electron
+   * è stato provato ma in questa app non ha effetto sul layout.
+   */
+  function applyZoom(factor, { save = true } = {}) {
+    const v = clampZoom(Number(factor) || 1);
+    zoomNow = v;
+    document.documentElement.style.setProperty('--ui-zoom', String(v));
+    if (el.zoomLabel) el.zoomLabel.textContent = `${Math.round(v * 100)}%`;
+    if (save) {
+      try { localStorage.setItem(ZOOM_KEY, String(v)); } catch { /* ignora */ }
+    }
+    redrawPreviewAfterZoom();
+    return v;
+  }
+
+  // applica lo zoom ricordato subito, prima del primo disegno (niente "lampo")
+  try {
+    const stored = Number(localStorage.getItem(ZOOM_KEY));
+    const start = Number.isFinite(stored) && stored > 0 ? stored : defaultZoomForScreen();
+    document.documentElement.style.setProperty('--ui-zoom', String(clampZoom(start)));
+  } catch { /* resta al 100% */ }
+
+  function initZoom() {
+    let start;
+    try {
+      const stored = Number(localStorage.getItem(ZOOM_KEY));
+      start = Number.isFinite(stored) && stored > 0 ? stored : defaultZoomForScreen();
+    } catch {
+      start = defaultZoomForScreen();
+    }
+    applyZoom(start, { save: false });
+
+    const step = (dir) => applyZoom(currentZoom() + dir * ZOOM_STEP);
+    if (el.btnZoomIn) el.btnZoomIn.addEventListener('click', () => step(1));
+    if (el.btnZoomOut) el.btnZoomOut.addEventListener('click', () => step(-1));
+    if (el.btnZoomReset) el.btnZoomReset.addEventListener('click', () => applyZoom(1));
+
+    // Ctrl + / Ctrl - / Ctrl 0 (Cmd su macOS)
+    window.addEventListener('keydown', (e) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const k = e.key;
+      if (k === '+' || k === '=' || k === 'Add') { e.preventDefault(); step(1); }
+      else if (k === '-' || k === '_' || k === 'Subtract') { e.preventDefault(); step(-1); }
+      else if (k === '0') { e.preventDefault(); applyZoom(1); }
+    }, { capture: true });
+
+    // Ctrl + rotellina
+    window.addEventListener('wheel', (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      applyZoom(currentZoom() + (e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP));
+    }, { passive: false });
   }
 
   function catColor(idx) {
@@ -5750,6 +5843,11 @@ const App = (() => {
     el.btnTheme.addEventListener('click', () => {
       applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
     });
+
+    // ---------------------------------------------------------------- zoom UI
+    // Sui portatili 13-14" l'interfaccia al 100% risulta grande: qui si può
+    // rimpicciolire con Ctrl +/-, Ctrl + rotellina o i comandi nel menu in alto.
+    initZoom();
 
     // ordinamento libreria
     document.getElementById('sort-select').addEventListener('change', (e) => {

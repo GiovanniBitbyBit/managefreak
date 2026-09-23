@@ -1,4 +1,4 @@
-// ManageFreak — preload bridge
+﻿// ManageFreak â€” preload bridge
 'use strict';
 
 const { contextBridge, ipcRenderer } = require('electron');
@@ -28,7 +28,7 @@ contextBridge.exposeInMainWorld('mfapi', {
   // apre un link nel browser (solo domini fidati, filtro nel main process)
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
   // MIDI nativo (RtMidi nel processo principale): stessi concetti di Web MIDI,
-  // ma senza dipendere dallo strato di Chromium che su Windows può incastrarsi.
+  // ma senza dipendere dallo strato di Chromium che su Windows puÃ² incastrarsi.
   midiStatus: () => ipcRenderer.invoke('midi:status'),
   midiList: () => ipcRenderer.invoke('midi:list'),
   midiOpen: (inputId, outputId) => ipcRenderer.invoke('midi:open', inputId, outputId),

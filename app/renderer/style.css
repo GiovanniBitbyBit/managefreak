@@ -1,5 +1,7 @@
-/* ManageFreak — stile */
+﻿/* ManageFreak â€” stile */
 :root {
+  /* zoom dell'interfaccia: 1 = 100%. Lo cambia il menu in alto o Ctrl +/-/0. */
+  --ui-zoom: 1;
   --bg: #16161e;
   --bg2: #1d1d27;
   --bg3: #242431;
@@ -66,13 +68,19 @@
 html, body {
   margin: 0;
   padding: 0;
-  height: 100%;
+  /* dimensioni compensate per lo zoom dell'interfaccia: con --ui-zoom < 1 la
+     pagina deve continuare a riempire la finestra, non lasciare bordi vuoti */
+  height: calc(100vh / var(--ui-zoom));
+  width: calc(100vw / var(--ui-zoom));
   background: var(--bg);
   color: var(--text);
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
   font-size: 14px;
   overflow: hidden;
 }
+
+/* zoom dell'interfaccia (utile su schermi piccoli): agisce su layout e disegno */
+html { zoom: var(--ui-zoom); }
 
 .hidden { display: none !important; }
 .muted { color: var(--muted); font-weight: 400; }
@@ -117,7 +125,7 @@ button, input, select, textarea {
   left: 0;
   z-index: 130;
   width: 400px;
-  max-width: calc(100vw - 24px);
+  max-width: calc(100vw / var(--ui-zoom) - 24px);
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -161,6 +169,16 @@ button, input, select, textarea {
 .app-menu-actions { display: flex; gap: 8px; margin-top: 12px; }
 .app-menu-note { font-size: 11px; color: var(--muted); margin-top: 10px; line-height: 1.35; }
 .app-menu-actions .app-menu-note { margin-top: 0; margin-right: auto; max-width: 240px; }
+/* comandi dello zoom: riga compatta nel menu dell'app */
+.app-menu-zoom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+}
+.app-menu-zoom .app-menu-zoom-label { margin: 0 auto 0 0; }
+.app-menu-zoom .btn { min-width: 34px; text-align: center; }
+#btn-zoom-reset { font-variant-numeric: tabular-nums; min-width: 58px; }
 
 .device-controls {
   margin-left: auto;
@@ -217,7 +235,7 @@ select {
   display: grid;
   grid-template-columns: var(--w-side) 8px 1fr 8px var(--w-right);
   grid-template-rows: 1fr 8px auto;
-  height: calc(100vh - 52px - 34px);
+  height: calc(100vh / var(--ui-zoom) - 52px - 34px);
 }
 
 #sidebar {
@@ -433,7 +451,7 @@ select {
 .slot-row.drag-over { border-color: var(--accent); background: rgba(255, 138, 61, .08); }
 .slot-row.swap-over { border-color: var(--sel); background: var(--sel-bg); }
 /* indicatore di inserimento: UNA sola barretta, sempre nella stessa posizione,
-   centrata nel gap fra la riga sopra e quella sotto (non più un bordo interno
+   centrata nel gap fra la riga sopra e quella sotto (non piÃ¹ un bordo interno
    alla riga, che appariva "attaccato" all'uno o all'altro preset) */
 .slot-row, .lib-row, .wt-row, .sm-row { position: relative; }
 .slot-row.drop-before::after, .slot-row.drop-after::after,
@@ -547,7 +565,7 @@ select {
   gap: 9px;
 }
 
-/* barra selezione multipla — colori della interfaccia, sticky */
+/* barra selezione multipla â€” colori della interfaccia, sticky */
 .sel-bar {
   display: flex;
   align-items: center;
@@ -592,7 +610,7 @@ select {
 
 /* indicatori di posizionamento durante il drag & drop */
 /* vista a griglia: barretta VERTICALE centrata nel gap fra due card
-   (stessa logica della vista a lista, ruotata di 90°) */
+   (stessa logica della vista a lista, ruotata di 90Â°) */
 .lib-card.drop-left::before,
 .lib-card.drop-right::before {
   content: '';
@@ -608,7 +626,7 @@ select {
 .lib-card.drop-right::before { right: -6.5px; }
 
 /* durante un trascinamento la riga sotto il puntatore non deve accendere anche
-   il proprio bordo/alone di hover: l'unica indicazione è la barretta sopra */
+   il proprio bordo/alone di hover: l'unica indicazione Ã¨ la barretta sopra */
 body.mf-dragging .lib-row:hover:not(.selected) { border-color: transparent; }
 body.mf-dragging .lib-card:hover:not(.selected) { border-color: transparent; transform: none; }
 body.mf-dragging .slot-row:hover:not(.selected) { background: transparent; }
@@ -804,8 +822,8 @@ body.mf-dragging .sm-row:hover:not(.selected) { background: transparent; }
   border-radius: 12px;
   padding: 18px;
   width: 440px;
-  max-width: 92vw;
-  max-height: 80vh;
+  max-width: calc(92vw / var(--ui-zoom));
+  max-height: calc(80vh / var(--ui-zoom));
   overflow-y: auto;
 }
 .modal h3 { margin: 0 0 12px; }
@@ -907,7 +925,7 @@ body.mf-dragging .sm-row:hover:not(.selected) { background: transparent; }
 }
 #update-modal {
   width: 520px;
-  max-width: 94vw;
+  max-width: calc(94vw / var(--ui-zoom));
 }
 #update-title { display: flex; align-items: center; gap: 8px; }
 #update-body { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
@@ -1124,11 +1142,11 @@ body.mf-dragging .sm-row:hover:not(.selected) { background: transparent; }
 
 /* ---------------------------------------------------------------- split a due pannelli (wavetable/sample) */
 /* Le due colonne (libreria PC e MicroFreak) scorrono in modo INDIPENDENTE:
-   la vista non scorre più come un blocco unico, così la libreria resta
+   la vista non scorre piÃ¹ come un blocco unico, cosÃ¬ la libreria resta
    visibile mentre si scorre l'elenco del device. */
 #content.tab-wavetables,
 #content.tab-samples {
-  overflow: hidden; /* lo scroll è dei singoli pannelli */
+  overflow: hidden; /* lo scroll Ã¨ dei singoli pannelli */
   display: flex;
   flex-direction: column;
 }

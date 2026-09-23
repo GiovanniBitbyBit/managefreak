@@ -1,4 +1,4 @@
-// ManageFreak — Electron main process
+﻿// ManageFreak â€” Electron main process
 'use strict';
 
 const { app, BrowserWindow, ipcMain, dialog, shell, session } = require('electron');
@@ -6,7 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
 // MIDI nativo (RtMidi: WinMM/CoreMIDI/ALSA) nel processo principale: lo strato
-// Web MIDI di Chromium su Windows può smettere di enumerare i dispositivi.
+// Web MIDI di Chromium su Windows puÃ² smettere di enumerare i dispositivi.
 const midiBackend = require('./midi-backend');
 
 let mainWindow = null;
@@ -53,7 +53,7 @@ function createWindow() {
       try {
         mainWindow.reload();
       } catch {
-        /* finestra già chiusa */
+        /* finestra giÃ  chiusa */
       }
     }, 600);
   });
@@ -68,7 +68,7 @@ function createWindow() {
 
   // Prima di chiudere la finestra: avvisa il renderer, che rilascia le porte MIDI.
   // Senza questo rilascio Windows resta con il MicroFreak occupato e al successivo
-  // avvio l'app non vede più nessuna porta MIDI ("la prima volta funziona, poi no").
+  // avvio l'app non vede piÃ¹ nessuna porta MIDI ("la prima volta funziona, poi no").
   let quitting = false;
   mainWindow.on('close', (e) => {
     if (quitting) return;
@@ -77,7 +77,7 @@ function createWindow() {
     try {
       mainWindow.webContents.send('app:prepare-quit');
     } catch {
-      /* renderer già andato */
+      /* renderer giÃ  andato */
     }
     // un attimo per far chiudere le porte al renderer, poi si chiude davvero
     setTimeout(() => {
@@ -89,7 +89,7 @@ function createWindow() {
       try {
         mainWindow.destroy();
       } catch {
-        /* già chiusa */
+        /* giÃ  chiusa */
       }
     }, 600);
   });
@@ -192,7 +192,7 @@ function createWindow() {
             toggle.click();
             if (grid.classList.contains('lib-list-view')) issues.push('view toggle not reversible');
           }
-          // multi-selezione con Ctrl → azioni nel pannello dettagli
+          // multi-selezione con Ctrl â†’ azioni nel pannello dettagli
           const cards = Array.from(document.querySelectorAll('#lib-grid .lib-card, #lib-grid .lib-row'));
           if (cards.length >= 2) {
             cards[0].dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
@@ -200,7 +200,7 @@ function createWindow() {
             const detailActions = document.getElementById('detail-actions');
             const nMulti = detailActions ? detailActions.querySelectorAll('button').length : 0;
             if (nMulti < 5) issues.push('multi-selection actions missing in details: ' + nMulti);
-            // deselezione: click singolo su una card già selezionata → pannello vuoto
+            // deselezione: click singolo su una card giÃ  selezionata â†’ pannello vuoto
             cards[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
             const detailHidden = document.getElementById('detail').classList.contains('hidden');
             const emptyShown = !document.getElementById('detail-empty').classList.contains('hidden');
@@ -236,9 +236,9 @@ function resolveInUserData(p) {
   return resolved;
 }
 
-// L'aggiornamento automatico è possibile solo nell'app installata su Windows
+// L'aggiornamento automatico Ã¨ possibile solo nell'app installata su Windows
 // (installer NSIS): la versione portable e le build macOS/Linux non hanno un
-// canale di update — lì si offre il controllo manuale con link alla release.
+// canale di update â€” lÃ¬ si offre il controllo manuale con link alla release.
 const canAutoUpdate = process.platform === 'win32' && !process.env.PORTABLE_EXECUTABLE_DIR;
 
 ipcMain.handle('app:info', () => ({
@@ -261,7 +261,7 @@ ipcMain.handle('app:open-external', async (_e, url) => {
   return true;
 });
 
-/** Confronto di versioni "1.2.3" → true se a è più recente di b. */
+/** Confronto di versioni "1.2.3" â†’ true se a Ã¨ piÃ¹ recente di b. */
 function isNewerVersion(a, b) {
   const pa = String(a || '').replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
   const pb = String(b || '').replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
@@ -352,7 +352,7 @@ let updatePhase = 'idle'; // idle | check | download | install (per gli errori)
 
 function sendUpdateEvent(payload) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  // nelle modalità di test (smoke/screenshots) non aprire dialoghi di update
+  // nelle modalitÃ  di test (smoke/screenshots) non aprire dialoghi di update
   if (process.argv.includes('--smoke') || process.argv.includes('--screenshots')) return;
   mainWindow.webContents.send('update-event', payload);
 }
@@ -371,7 +371,7 @@ function extractReleaseNotes(info) {
 function initAutoUpdater() {
   // l'auto-update funziona solo nell'app impacchettata (installer NSIS);
   // in sviluppo (`npm start`), nella versione portable e su macOS/Linux non
-  // parte nulla: lì il menu About usa il controllo manuale (vedi canAutoUpdate).
+  // parte nulla: lÃ¬ il menu About usa il controllo manuale (vedi canAutoUpdate).
   if (!app.isPackaged || !canAutoUpdate) return;
   let au;
   try {
@@ -426,7 +426,7 @@ function initAutoUpdater() {
   });
   au.on('error', (err) => {
     logCrash('updater error: ' + (err && err.stack || err));
-    // gli errori del check automatico all'avvio restano silenziosi; se però
+    // gli errori del check automatico all'avvio restano silenziosi; se perÃ²
     // l'utente ha avviato lui download/installazione, l'errore deve arrivare
     const phase = updatePhase;
     const userInitiated = phase === 'download' || phase === 'install';
@@ -457,7 +457,7 @@ function initAutoUpdater() {
         case 'install':
           if (updateDownloaded) {
             updatePhase = 'install';
-            // piccola pausa così il renderer mostra lo stato prima della chiusura
+            // piccola pausa cosÃ¬ il renderer mostra lo stato prima della chiusura
             setTimeout(() => {
               try {
                 au.quitAndInstall(false, true);
@@ -468,7 +468,7 @@ function initAutoUpdater() {
           }
           return true;
         case 'later':
-          // "più tardi" NON annulla il download già fatto: l'aggiornamento
+          // "piÃ¹ tardi" NON annulla il download giÃ  fatto: l'aggiornamento
           // resta pronto e installabile dal menu dell'app
           return true;
         default:
@@ -487,7 +487,7 @@ function initAutoUpdater() {
     if (updaterEngine !== au) return;
     autoCheckPending = true;
     au.checkForUpdates()
-      .catch(() => { /* gli errori arrivano già come evento */ })
+      .catch(() => { /* gli errori arrivano giÃ  come evento */ })
       .finally(() => { autoCheckPending = false; });
   }, 5000);
 }
@@ -553,7 +553,7 @@ ipcMain.handle('dialog:export-folder', async (_e, files) => {
 });
 
 ipcMain.handle('dialog:export-bank', async (_e, files) => {
-  // files: [{name, dataB64}] — crea una sottocartella datata e scrive lì
+  // files: [{name, dataB64}] â€” crea una sottocartella datata e scrive lÃ¬
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory', 'createDirectory'],
     title: 'Where should the MicroFreak bank be saved?',
@@ -571,8 +571,7 @@ ipcMain.handle('dialog:export-bank', async (_e, files) => {
   return folder;
 });
 
-// ---------------------------------------------------------------- MIDI nativo
-// Il renderer parla al MIDI attraverso questi canali; se il modulo nativo non è
+// ---------------------------------------------------------------- MIDI nativo// Il renderer parla al MIDI attraverso questi canali; se il modulo nativo non Ã¨
 // disponibile risponde ok:false e il renderer ripiega su Web MIDI.
 ipcMain.handle('midi:status', () => midiBackend.status());
 ipcMain.handle('midi:list', () => midiBackend.list());

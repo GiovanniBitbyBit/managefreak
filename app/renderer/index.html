@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- niente meta viewport: in un'app desktop fa usare la semantica "mobile",
+       che impedisce allo zoom di pagina di ridimensionare il layout -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
   <title>ManageFreak</title>
@@ -25,6 +26,12 @@
         </div>
         <div class="app-menu-label">Changelog — latest release</div>
         <div id="app-menu-changelog" class="app-menu-changelog">Loading…</div>
+        <div class="app-menu-zoom">
+          <span class="app-menu-label app-menu-zoom-label">Zoom</span>
+          <button id="btn-zoom-out" class="btn small" title="Zoom out (Ctrl -)">−</button>
+          <button id="btn-zoom-reset" class="btn small" title="Reset to 100% (Ctrl 0)"><span id="zoom-label">100%</span></button>
+          <button id="btn-zoom-in" class="btn small" title="Zoom in (Ctrl +)">+</button>
+        </div>
         <div class="app-menu-actions">
           <button id="btn-check-updates" class="btn primary">Check for updates</button>
         </div>
