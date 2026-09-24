@@ -1,7 +1,7 @@
 {
   "name": "managefreak",
   "productName": "ManageFreak",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Open-source preset manager for the Arturia MicroFreak (Windows/macOS/Linux)",
   "main": "main.js",
   "author": {
@@ -24,6 +24,9 @@
   "dependencies": {
     "@julusian/midi": "^3.8.1",
     "electron-updater": "^6.8.9"
+  },
+  "overrides": {
+    "js-yaml": "^4.3.2"
   },
   "build": {
     "appId": "dev.managefreak.app",
