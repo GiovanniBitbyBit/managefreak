@@ -124,6 +124,8 @@ const App = (() => {
 
   let appVersion = ''; // versione dell'app (impostata in init)
   let canAutoUpdate = true; // false su macOS/Linux e sulla build portable
+  // pagina di sostegno al progetto (pulsante ☕ Ko-fi nel menu in alto a sinistra)
+  const KOFI_URL = 'https://ko-fi.com/markgionus';
 
   // Indicatore di trascinamento: UNO solo, tracciato in una variabile. Prima si
   // ripulivano tutte le righe a ogni movimento del mouse (con 1000+ preset era
@@ -144,8 +146,12 @@ const App = (() => {
   }
 
   /** Card della libreria sotto il puntatore (o la più vicina se il punto è nel
-   *  gap), con l'indicazione se inserire prima o dopo. */
+   *  gap), con l'indicazione se inserire prima o dopo.
+   *  Le coordinate in ingresso sono quelle del puntatore (visive): qui vengono
+   *  portate in unità di layout, come i rect degli elementi. */
   function libDropTargetFromPoint(clientX, clientY) {
+    clientX = toLayout(clientX);
+    clientY = toLayout(clientY);
     const grid = el.libGrid;
     if (!grid) return null;
     const cards = Array.from(grid.querySelectorAll('.lib-card, .lib-row'));
@@ -274,6 +280,17 @@ const App = (() => {
   const clampZoom = (v) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(v * 100) / 100));
   const currentZoom = () => zoomNow;
 
+  /**
+   * Converte una coordinata del puntatore (pixel VISIVI) in unità di layout.
+   *
+   * Lo zoom dell'interfaccia è una scala CSS sul nodo radice: i rect degli
+   * elementi restano in unità di layout, mentre clientX/clientY e
+   * elementFromPoint lavorano in pixel visivi. Senza questa conversione, a zoom
+   * diverso dal 100% gli indicatori di trascinamento finivano sulla riga
+   * sbagliata (bug segnalato: "selettori disallineati").
+   */
+  const toLayout = (client) => (Number(client) || 0) / (zoomNow || 1);
+
   /** Primo avvio: su schermi piccoli si parte già rimpiccioliti. */
   function defaultZoomForScreen() {
     const w = (window.screen && window.screen.availWidth) || 1920;
@@ -387,8 +404,18 @@ const App = (() => {
         if (ok) close(true);
       };
       el.modalCancel.onclick = () => close(false);
+      // Chiusura cliccando fuori: solo se il click È INIZIATO sullo sfondo.
+      // Senza questo controllo bastava selezionare del testo in un campo e
+      // rilasciare il mouse fuori dalla finestra: il browser generava un click
+      // sullo sfondo e la finestra si chiudeva perdendo quello che stavi scrivendo.
+      let pressedOnBackdrop = false;
+      el.modalBackdrop.onmousedown = (e) => {
+        pressedOnBackdrop = e.target === el.modalBackdrop;
+      };
       el.modalBackdrop.onclick = (e) => {
-        if (e.target === el.modalBackdrop) close(false);
+        const startedOutside = pressedOnBackdrop;
+        pressedOnBackdrop = false;
+        if (startedOutside && e.target === el.modalBackdrop) close(false);
       };
     });
   }
@@ -572,6 +599,10 @@ const App = (() => {
     }
     try {
       await Midi.open(inId, outId);
+      // collegamento nuovo: canale MIDI del synth e contenuto dello slot di
+      // appoggio vanno riletti, il vecchio stato non vale più
+      auditionChannel = null;
+      auditionLoadedId = null;
       el.connStatus.className = 'status-dot online';
       el.connStatus.title = `Connected: ${Midi.currentNames().output}`;
       status('Connected to the MicroFreak. Synchronizing…');
@@ -655,38 +686,73 @@ const App = (() => {
     }
   }
 
-  /** Carica l'intera libreria PC sul MicroFreak (slot 1..N), con conferma. */
-  async function uploadLibraryToDevice() {
-    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
-    const entries = Library.all().filter((e) => e.dataB64 && !isInitNamed(e));
-    if (!entries.length) return toast('The library is empty.', 'err');
-    const n = Math.min(entries.length, 512);
-    const est = Math.max(1, Math.round((n * 1.1) / 60));
-    const yes = await showModal(
-      `Upload ${n} library presets to the MicroFreak?`,
-      `<p>The first <strong>${n}</strong> library presets will be written to the first <strong>${n}</strong> slots
-       (1–${n}), overwriting the current content. Each slot is read as a backup and restored on error.</p>
-       <p class="muted" style="font-size:12px">Estimated time: about ${est} minutes. You can cancel at any time.</p>`,
-      { okLabel: 'Upload to MicroFreak' }
-    );
-    if (!yes) return;
+  /**
+   * Cosa c'è adesso in uno slot, secondo la cache degli header dello scan.
+   * Serve a dire, PRIMA di scrivere, quali preset verranno sovrascritti.
+   */
+  function slotOccupant(slot) {
+    const cur = state.device ? state.device[slot - 1] : null;
+    if (!cur) return { label: 'not read yet', kind: 'unknown' };
+    if (cur.error) return { label: 'unreadable', kind: 'unknown' };
+    if (cur.empty) return { label: 'empty', kind: 'empty' };
+    return { label: cur.name || '—', kind: 'occupied' };
+  }
 
-    setBusy(true, 'Uploading library…');
+  /**
+   * Tabella slot → preset in arrivo → preset presente, nello stesso stile della
+   * tabella del dialogo del volume.
+   */
+  function slotPlanHtml(items) {
+    if (!items.length) return '';
+    const rows = items.map((it) => {
+      const occ = slotOccupant(it.slot);
+      const cls = occ.kind === 'empty' ? 'vsi-free' : (occ.kind === 'unknown' ? 'vsi-none' : 'vsi-over');
+      return `<div class="vol-summary-item">
+        <span class="vsi-slot">${it.slot}</span>
+        <span class="vsi-name" title="${esc(it.name)}">${esc(it.name)}</span>
+        <span class="${cls}" title="${esc(occ.label)}">${esc(occ.label)}</span>
+      </div>`;
+    }).join('');
+    return `<div class="vol-summary slot-plan">
+        <div class="vol-summary-header"><span>Slot</span><span>You are sending</span><span>Currently there</span></div>
+        <div class="vol-summary-body">${rows}</div>
+      </div>`;
+  }
+
+  /**
+   * Scrive una lista di preset negli slot consecutivi a partire da `startSlot`.
+   *
+   * Nessuno shift: gli slot di destinazione vengono SOVRASCRITTI. Per ognuno:
+   * lettura del contenuto attuale come backup, scrittura, rilettura di verifica,
+   * ripristino automatico se la verifica fallisce. È la stessa procedura usata
+   * dall'invio di un singolo preset, ripetuta N volte.
+   *
+   * @returns {{done:number, failed:number, lastSlot:number, leftOut:number}}
+   */
+  async function writeEntriesToSlots(ids, startSlot, { busyLabel = 'Writing presets…' } = {}) {
+    undoWillDo(`${ids.length} preset${ids.length === 1 ? '' : 's'} → slots from ${startSlot}`);
+    const room = Math.max(0, 512 - startSlot + 1);
+    const toSend = ids.slice(0, room);
+    const leftOut = ids.length - toSend.length;
+    const n = toSend.length;
+
+    setBusy(true, busyLabel);
     el.btnCancel.classList.remove('hidden');
     state.cancelRequested = false;
     let done = 0;
     let failed = 0;
+    let lastSlot = startSlot - 1;
     try {
       for (let i = 0; i < n; i++) {
         if (state.cancelRequested) throw new Error('Operation cancelled');
-        const entry = Library.get(entries[i].id);
+        const entry = Library.get(toSend[i]);
         if (!entry || !entry.data) { failed++; done++; continue; }
-        const slot = i + 1;
+        const slot = startSlot + i;
         let backup = null;
         try {
           const cur = await MF.readHeader(slot, 4000);
           if (!cur.empty) backup = await MF.readPreset(slot, { timeoutMs: 4000 });
-          await MF.writePreset(slot, {
+          await devWritePreset(slot, {
             name: entry.name,
             category: typeof entry.category === 'number' && entry.category >= 0 ? entry.category : 0,
             p1: entry.p1 || 0,
@@ -695,8 +761,8 @@ const App = (() => {
           const h = await MF.readHeader(slot, 4000);
           if (h.empty || h.name !== entry.name) throw new Error('header verification failed');
           // la cache degli header esiste solo dopo uno scan riuscito: se l'utente
-          // lancia l'upload appena connesso va aggiornata solo se c'è, altrimenti
-          // un TypeError interromperebbe il caricamento a metà
+          // lancia l'operazione appena connesso va aggiornata solo se c'è,
+          // altrimenti un TypeError interromperebbe la scrittura a metà
           if (state.device) {
             state.device[slot - 1] = {
               slot, name: entry.name,
@@ -708,21 +774,775 @@ const App = (() => {
           failed++;
           if (backup && backup.data) {
             try {
-              await MF.writePreset(slot, { name: backup.name, category: backup.category, p1: backup.p1, data: backup.data }, { timeoutMs: 4000 });
+              await devWritePreset(slot, { name: backup.name, category: backup.category, p1: backup.p1, data: backup.data }, { timeoutMs: 4000 });
             } catch { /* ripristino non riuscito */ }
           }
         }
         done++;
-        setProgress(done / n, `Slot ${slot}/${n}…`);
+        lastSlot = slot;
+        setProgress(done / n, `Slot ${slot} (${i + 1}/${n})…`);
       }
       renderDevice();
-      toast(`Uploaded ${n - failed} presets to the MicroFreak${failed ? `, ${failed} errors` : ''} ✓`, 'ok', 6000);
+      toast(
+        `${n - failed} preset${n - failed === 1 ? '' : 's'} written to slot${n - failed === 1 ? '' : 's'} ` +
+        `${startSlot}–${lastSlot}${failed ? `, ${failed} errors` : ''}` +
+        `${leftOut ? `, ${leftOut} left out (past slot 512)` : ''} ✓`,
+        'ok', 7000
+      );
     } catch (e) {
-      toast('Upload interrupted: ' + (e.message || e), 'err', 6000);
+      toast('Write interrupted: ' + (e.message || e), 'err', 6000);
     } finally {
       setBusy(false);
       setProgress(null);
+      el.btnCancel.classList.add('hidden');
     }
+    return { done, failed, lastSlot, leftOut };
+  }
+
+  // ------------------------------------------------------------------ ascolto rapido
+  //
+  // La libreria del PC contiene solo i DATI dei preset: il suono lo genera il
+  // MicroFreak. Non esiste un buffer temporaneo scrivibile via SysEx (nemmeno MIDI
+  // Control Center legge la patch corrente), quindi per ascoltare un preset della
+  // libreria bisogna per forza: scriverlo in uno slot di appoggio sul synth,
+  // selezionare quello slot (Bank Select + Program Change) e mandare una nota.
+  // Lo slot di appoggio viene letto e copiato PRIMA della prima scrittura, così il
+  // suo contenuto originale resta ripristinabile.
+
+  const AUDITION_KEY = 'managefreak-audition';
+  const AUDITION_CHIPS = 10; // slot Init mostrati sempre; oltre, tendina richiudibile
+  const AUDITION_NOTES = [
+    { label: 'C3', value: 48 }, { label: 'C4', value: 60 }, { label: 'G4', value: 67 },
+    { label: 'C5', value: 72 }, { label: 'C6', value: 84 },
+  ];
+  const audition = { slot: 0, note: 72, ms: 900, velocity: 100 };
+  let auditionLoadedId = null;   // preset attualmente nello slot di appoggio
+  let auditionBackup = null;     // { slot, preset, wasEmpty } contenuto originale
+  let auditionChannel = null;    // canale di ingresso del synth (0-based), -1 = None
+  let auditionNoteChannel = 0;   // canale usato per la nota in corso
+  let auditionBusy = false;
+  let auditionTimer = null;
+  let auditionNoteOn = false;
+
+  const noteLabel = (v) => (AUDITION_NOTES.find((n) => n.value === v) || { label: 'MIDI ' + v }).label;
+
+  function loadAuditionSettings() {
+    try {
+      const raw = localStorage.getItem(AUDITION_KEY);
+      if (!raw) return;
+      const o = JSON.parse(raw) || {};
+      if (Number.isFinite(o.slot)) audition.slot = Math.min(512, Math.max(0, Math.round(o.slot)));
+      if (Number.isFinite(o.note)) audition.note = Math.min(127, Math.max(0, Math.round(o.note)));
+      if (Number.isFinite(o.ms)) audition.ms = Math.min(5000, Math.max(150, Math.round(o.ms)));
+    } catch { /* impostazioni illeggibili: restano i valori di default */ }
+  }
+
+  function saveAuditionSettings() {
+    try {
+      localStorage.setItem(AUDITION_KEY, JSON.stringify({ slot: audition.slot, note: audition.note, ms: audition.ms }));
+    } catch { /* storage non disponibile */ }
+  }
+
+  /** Canale su cui il MicroFreak ascolta, letto dalle sue global (0-based).
+   *  -1 = "MIDI In: None": il synth non riceve nulla e va detto all'utente. */
+  async function auditionMidiChannel() {
+    if (auditionChannel !== null) return auditionChannel;
+    try {
+      const code = MF.GLOBAL_CODES && MF.GLOBAL_CODES['midi.channel_in'];
+      if (code === undefined) return 0;
+      const raw = await MF.readGlobalCode(code);
+      if (raw <= 15) auditionChannel = raw;
+      else if (raw === 127) auditionChannel = 0; // "All" → si usa il canale 1
+      else auditionChannel = -1;                 // "None"
+    } catch {
+      return 0; // lettura non riuscita: si prova il canale 1 senza memorizzare l'esito
+    }
+    return auditionChannel;
+  }
+
+  /** Copia il preset nello slot di appoggio, conservando l'originale la prima volta. */
+  async function auditionLoadIntoSlot(entry) {
+    const slot = audition.slot;
+    if (!auditionBackup || auditionBackup.slot !== slot) {
+      const cur = await MF.readHeader(slot, 4000);
+      const preset = cur.empty ? null : await MF.readPreset(slot, { timeoutMs: 4000 });
+      auditionBackup = { slot, preset, wasEmpty: !!cur.empty };
+    }
+    const category = typeof entry.category === 'number' && entry.category >= 0 ? entry.category : 0;
+    await devWritePreset(slot, {
+      name: entry.name, category, p1: entry.p1 || 0, data: entry.data,
+    }, { timeoutMs: 4000 });
+    const h = await MF.readHeader(slot, 4000);
+    if (h.empty || h.name !== entry.name) throw new Error('the MicroFreak did not confirm the write');
+    if (state.device) {
+      state.device[slot - 1] = { slot, name: entry.name, category, p1: entry.p1 || 0, empty: false };
+    }
+    auditionLoadedId = entry.id;
+    renderDevice();
+  }
+
+  function stopAuditionNote() {
+    if (auditionTimer) { clearTimeout(auditionTimer); auditionTimer = null; }
+    if (!auditionNoteOn) return;
+    auditionNoteOn = false;
+    try { Midi.sendNoteOff(auditionNoteChannel, audition.note); } catch { /* porta già chiusa */ }
+  }
+
+  async function playAuditionNote() {
+    const ch = await auditionMidiChannel();
+    if (ch < 0) throw new Error('MIDI In is set to None on the MicroFreak, so it cannot receive notes');
+    stopAuditionNote();
+    auditionNoteChannel = ch;
+    Midi.sendNoteOn(ch, audition.note, audition.velocity);
+    auditionNoteOn = true;
+    auditionTimer = setTimeout(() => stopAuditionNote(), audition.ms);
+  }
+
+  /** Riporta lo slot di appoggio al contenuto letto prima del primo ascolto. */
+  async function restoreAuditionSlot({ quiet = false } = {}) {
+    const b = auditionBackup;
+    if (!b) {
+      if (!quiet) toast('Nothing to restore yet: the slot is copied the first time you listen.', 'err', 5000);
+      return false;
+    }
+    if (b.slot !== audition.slot) {
+      if (!quiet) toast(`The saved copy belongs to slot ${b.slot}, not to slot ${audition.slot}.`, 'err', 6000);
+      return false;
+    }
+    if (b.wasEmpty || !b.preset || !b.preset.data) {
+      if (!quiet) {
+        toast('That slot was empty and the protocol cannot recreate an empty slot: pick an occupied slot as scratch.', 'err', 8000);
+      }
+      return false;
+    }
+    setBusy(true, `Restoring slot ${b.slot}…`);
+    try {
+      const p = b.preset;
+      await devWritePreset(b.slot, { name: p.name, category: p.category, p1: p.p1, data: p.data }, { timeoutMs: 4000 });
+      const h = await MF.readHeader(b.slot, 4000);
+      if (h.empty || h.name !== p.name) throw new Error('verification failed');
+      if (state.device) {
+        state.device[b.slot - 1] = { slot: b.slot, name: p.name, category: p.category, p1: p.p1, empty: false };
+      }
+      auditionLoadedId = null;
+      auditionBackup = null;
+      renderDevice();
+      toast(`Slot ${b.slot} restored ✓`, 'ok');
+      return true;
+    } catch (e) {
+      toast('Restore failed: ' + (e.message || e), 'err', 6000);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Impostazioni dell'ascolto: slot di appoggio, nota, durata. */
+  async function auditionSettingsDialog() {
+    const initSlots = (state.device || [])
+      .filter((s) => s && !s.empty && isInitNamed(s))
+      .map((s) => s.slot);
+    const suggested = audition.slot || (initSlots.length ? initSlots[0] : 512);
+    const noteOpts = AUDITION_NOTES
+      .map((n) => `<option value="${n.value}"${n.value === audition.note ? ' selected' : ''}>${n.label}</option>`)
+      .join('');
+    // gli slot Init trovati sul synth, cliccabili per riempire il campo.
+    // Tre casi distinti: non connesso, scansione non ancora finita, nessuno Init.
+    const chip = (s) => `<button type="button" class="btn small" data-sug="${s}">${s}</button>`;
+    let suggestions;
+    let moreSlots = '';
+    if (!Midi.isOpen()) {
+      suggestions = '<span class="muted">connect to the MicroFreak to see its slots</span>';
+    } else if (state.devicePhase !== 'ready') {
+      suggestions = '<span class="muted">still reading the MicroFreak…</span>';
+    } else if (!initSlots.length) {
+      suggestions = '<span class="muted">none found on this MicroFreak</span>';
+    } else {
+      // i primi dieci restano sempre visibili; se ce ne sono altri si apre una
+      // tendina, altrimenti l'elenco da solo riempirebbe la finestra
+      suggestions = initSlots.slice(0, AUDITION_CHIPS).map(chip).join('');
+      if (initSlots.length > AUDITION_CHIPS) {
+        moreSlots = `
+          <div class="audition-more">
+            <button type="button" class="btn small" id="aud-more" aria-expanded="false"
+                    title="Show all ${initSlots.length} Init slots">▾ show all ${initSlots.length}</button>
+            <div class="audition-more-list hidden" id="aud-more-list">${initSlots.map(chip).join('')}</div>
+          </div>`;
+      }
+    }
+    // Ultima voce della finestra: il ripristino dello slot di ascolto. È SEMPRE
+    // presente (con il motivo quando non è utilizzabile), altrimenti sembra che
+    // la funzione non esista finché non si è ascoltato qualcosa.
+    const b = auditionBackup;
+    const restaurabile = !!(b && !b.wasEmpty && b.slot === audition.slot && b.preset && b.preset.data);
+    const restoreNote = !b
+      ? 'Nothing to restore yet: the slot is copied the first time you listen to a preset.'
+      : (b.wasEmpty
+        ? `Slot ${b.slot} was empty before listening: the protocol cannot bring it back to empty.`
+        : (b.slot !== audition.slot
+          ? `The saved copy belongs to slot ${b.slot}, not to the slot in the field.`
+          : `Slot ${b.slot} was copied before listening and can be put back as it was.`));
+    const body = `
+      <p>This feature uses the MicroFreak itself: the audited preset on your library is written to a
+         <strong>scratch slot</strong> on the synth, then that slot is selected and a note is played.</p>
+      <p>By auditioning many consecutive presets, you keep overriding the same target slot on the MicroFreak.</p>
+      <div class="audition-form">
+        <label for="aud-slot">MicroFreak auditioning slot: <input id="aud-slot" type="number" min="1" max="512" value="${suggested}"></label>
+        <div class="audition-suggest"><span>Suggested slots (Init slots):</span>${suggestions}</div>
+        <label for="aud-note">Note played: <select id="aud-note">${noteOpts}</select></label>
+        <label for="aud-ms">Note length (ms): <input id="aud-ms" type="number" min="150" max="5000" step="50" value="${audition.ms}"></label>
+      </div>
+      ${moreSlots}
+      <p class="muted">You can also override an occupied preset slot, and reserve it to this feature.</p>
+      <p class="muted">Keep in mind that if a preset has a sequence or arpeggio in init, it is not able
+         to reproduce the note without first disabling the Seq or Arp.</p>
+      <div class="audition-restore">
+        <button type="button" class="btn small" id="aud-restore-btn"${restaurabile ? '' : ' disabled'}>↩ Restore the original content of the auditioning slot</button>
+        <span class="muted">${restoreNote}</span>
+      </div>`;
+    const chiusura = showModal('Listening (audition)', body, {
+      okLabel: 'Save',
+      onOk: () => {
+        const slot = parseInt(($('aud-slot') || {}).value, 10);
+        const note = parseInt(($('aud-note') || {}).value, 10);
+        const ms = parseInt(($('aud-ms') || {}).value, 10);
+        if (!Number.isFinite(slot) || slot < 1 || slot > 512) {
+          toast('Auditioning slot must be between 1 and 512.', 'err');
+          return false;
+        }
+        if (!Number.isFinite(note) || note < 0 || note > 127) {
+          toast('Invalid note.', 'err');
+          return false;
+        }
+        if (!Number.isFinite(ms) || ms < 150 || ms > 5000) {
+          toast('Note length must be between 150 and 5000 ms.', 'err');
+          return false;
+        }
+        const changed = slot !== audition.slot;
+        audition.slot = slot;
+        audition.note = note;
+        audition.ms = ms;
+        // cambiando slot di appoggio il vecchio backup non vale più
+        if (changed) { auditionBackup = null; auditionLoadedId = null; }
+        saveAuditionSettings();
+        renderAuditionButton();
+        return true;
+      },
+    });
+    // i suggerimenti riempiono il campo: i nodi spariscono alla prossima modale
+    el.modalBody.querySelectorAll('[data-sug]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const campo = $('aud-slot');
+        if (campo) campo.value = b.dataset.sug;
+      });
+    });
+    // freccia della tendina con l'elenco completo degli slot Init
+    const btnMore = $('aud-more');
+    if (btnMore) {
+      btnMore.addEventListener('click', () => {
+        const lista = $('aud-more-list');
+        if (!lista) return;
+        lista.classList.toggle('hidden');
+        btnMore.setAttribute('aria-expanded', lista.classList.contains('hidden') ? 'false' : 'true');
+      });
+    }
+    // ripristino immediato: non passa dal pulsante Save, è un'azione a sé
+    const btnRestore = $('aud-restore-btn');
+    if (btnRestore && restaurabile) {
+      btnRestore.addEventListener('click', async () => {
+        btnRestore.disabled = true;
+        const fatto = await restoreAuditionSlot();
+        if (fatto) el.modalCancel.click(); // lavoro concluso: la finestra si chiude
+        else btnRestore.disabled = false;
+      });
+    }
+    const ok = await chiusura;
+    return ok;
+  }
+
+  /** Ascolta un preset della libreria: carica nello slot di appoggio, seleziona, suona. */
+  async function auditionPreset(entry, btn = null) {
+    if (!entry || !entry.data || auditionBusy) return;
+    undoWillDo(`listen to “${entry.name}” in slot ${audition.slot}`);
+    if (state.busy) return toast('Another operation is running: try again when it finishes.', 'err');
+    if (!Midi.isOpen()) return toast('Connect to the MicroFreak first.', 'err');
+    if (isInitNamed(entry)) {
+      return toast('That is the firmware Init template: there is nothing to listen to.', 'err', 6000);
+    }
+    if (!audition.slot) {
+      const ok = await auditionSettingsDialog();
+      if (!ok || !audition.slot) return;
+    }
+    auditionBusy = true;
+    const label = btn ? btn.textContent : null;
+    if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    try {
+      if (auditionLoadedId !== entry.id) {
+        setBusy(true, `Loading “${entry.name}” into slot ${audition.slot}…`);
+        await auditionLoadIntoSlot(entry);
+        setBusy(false);
+      }
+      // selezione dello slot di appoggio: Bank Select + Program Change, già
+      // trasmessi su tutti i canali (il synth risponde sul suo canale di ingresso)
+      MF.selectPreset(audition.slot);
+      await playAuditionNote();
+      toast(`♪ ${entry.name} — slot ${audition.slot}, ${noteLabel(audition.note)}`, 'ok', 2500);
+    } catch (e) {
+      setBusy(false);
+      toast('Listening failed: ' + (e.message || e), 'err', 7000);
+    } finally {
+      auditionBusy = false;
+      if (btn) { btn.disabled = false; btn.textContent = label; }
+    }
+  }
+
+  function renderAuditionButton() {
+    const b = document.getElementById('btn-audition');
+    if (!b) return;
+    b.textContent = audition.slot
+      ? `🎧 Audition · slot ${audition.slot} · ${noteLabel(audition.note)}`
+      : '🎧 Audition: set up';
+    b.title = audition.slot
+      ? `Listening plays the preset on the MicroFreak, using slot ${audition.slot} as scratch. Click to change.`
+      : 'Set the scratch slot used to listen to presets on the MicroFreak.';
+  }
+
+  // ------------------------------------------------------------------ annullamento (undo)
+  //
+  // "Torna indietro" sull'ultima operazione che ha modificato il synth o la
+  // libreria. I dati per il ripristino si ottengono leggendo lo stato precedente
+  // PRIMA di scrivere: è lo stesso backup che serve al ripristino automatico in
+  // caso di errore, qui conservato invece di essere buttato via.
+  //
+  // Due avvertenze che l'interfaccia dice all'utente:
+  //  - annullare sul synth significa RISCRIVERE (una nuova scrittura in memoria
+  //    flash), non è un ripristino gratuito;
+  //  - non si può annullare un cambio di patch fatto a mano sul MicroFreak: il
+  //    synth non espone la patch corrente e non risponde ai Program Change.
+
+  const UNDO_GRACE_MS = 2500; // scritture ravvicinate = una sola voce annullabile
+  let undoTimer = null;
+  let undoSuggested = null;     // etichetta proposta dall'operazione in corso
+  let initTemplateCache = null; // template Init del firmware (slot che erano vuoti)
+
+  /** Apre (o prosegue) la voce di annullamento e ne rimanda la chiusura. */
+  function undoTouch() {
+    if (!Undo.active()) Undo.begin(undoSuggested || 'MicroFreak updated');
+    if (undoTimer) clearTimeout(undoTimer);
+    undoTimer = setTimeout(() => {
+      undoTimer = null;
+      Undo.commit();
+      undoSuggested = null;
+      renderUndoButton();
+    }, UNDO_GRACE_MS);
+  }
+
+  /** Etichetta della prossima operazione: la impostano le funzioni prima di scrivere. */
+  function undoWillDo(label) { undoSuggested = label; }
+
+  function renderUndoButton() {
+    const b = document.getElementById('btn-undo');
+    if (!b) return;
+    if (!Undo.canUndo()) {
+      b.disabled = true;
+      b.title = 'Nothing to undo yet.';
+      return;
+    }
+    b.disabled = false;
+    b.title = `Undo: ${Undo.undoLabel()}`;
+  }
+
+  // --- scritture registrate ------------------------------------------------
+  // Le chiamate a MF.* dentro queste funzioni sono volutamente dirette: sono il
+  // punto in cui si registra lo stato precedente, non vanno riscritte.
+
+  async function devWritePreset(slot, preset, opts) {
+    undoTouch(); // apre la voce di annullamento se non è già aperta
+    if (Undo.active()) {
+      try {
+        const cur = await MF.readHeader(slot, 4000); // undo-direct
+        if (cur.empty) {
+          Undo.recordPreset(slot, null);
+        } else {
+          const prev = await MF.readPreset(slot, { timeoutMs: 4000 }); // undo-direct
+          Undo.recordPreset(slot, prev && prev.data
+            ? { name: prev.name, category: prev.category, p1: prev.p1, data: prev.data }
+            : null);
+        }
+      } catch { /* senza lettura l'operazione non è annullabile, ma la scrittura procede */ }
+    }
+    return MF.writePreset(slot, preset, opts); // undo-direct
+  }
+
+  async function devWriteWavetable(slot, wt, opts) {
+    undoTouch(); // apre la voce di annullamento se non è già aperta
+    if (Undo.active()) {
+      try {
+        const h = await MF.readWavetableHeader(slot, 4000); // undo-direct
+        if (h.empty) {
+          Undo.recordWavetable(slot, null);
+        } else {
+          const prev = await MF.readWavetable(slot, { timeoutMs: 8000 }); // undo-direct
+          Undo.recordWavetable(slot, prev && prev.data ? { name: prev.name, data: prev.data } : null);
+        }
+      } catch { /* non annullabile */ }
+    }
+    return MF.writeWavetable(slot, wt, opts); // undo-direct
+  }
+
+  async function devClearWavetable(slot) {
+    undoTouch(); // apre la voce di annullamento se non è già aperta
+    if (Undo.active()) {
+      try {
+        const prev = await MF.readWavetable(slot, { timeoutMs: 8000 }); // undo-direct
+        Undo.recordWavetable(slot, prev && prev.data ? { name: prev.name, data: prev.data } : null);
+      } catch { /* non annullabile */ }
+    }
+    return MF.clearWavetable(slot); // undo-direct
+  }
+
+  async function devWriteSample(slot, name, data, opts) {
+    undoTouch(); // apre la voce di annullamento se non è già aperta
+    if (Undo.active()) {
+      try {
+        const h = await MF.readSampleHeader(slot, 4000); // undo-direct
+        if (h.empty) {
+          Undo.recordSample(slot, null);
+        } else {
+          const prev = await MF.readSample(slot, { timeoutMs: 20000 }); // undo-direct
+          Undo.recordSample(slot, prev && prev.data ? { name: prev.name, data: prev.data } : null);
+        }
+      } catch { /* non annullabile */ }
+    }
+    return MF.writeSample(slot, name, data, opts); // undo-direct
+  }
+
+  async function devClearSample(slot) {
+    undoTouch(); // apre la voce di annullamento se non è già aperta
+    if (Undo.active()) {
+      try {
+        const prev = await MF.readSample(slot, { timeoutMs: 20000 }); // undo-direct
+        Undo.recordSample(slot, prev && prev.data ? { name: prev.name, data: prev.data } : null);
+      } catch { /* non annullabile */ }
+    }
+    return MF.clearSample(slot); // undo-direct
+  }
+
+  const L = Library; // alias: qui le chiamate non vanno registrate
+
+  // --- libreria del PC -----------------------------------------------------
+
+  function libBegin(label) {
+    if (!Undo.active()) Undo.begin(label || undoSuggested || 'Library changed');
+    undoTouch();
+  }
+
+  function libRemove(id) {
+    const entry = Library.get(id);
+    if (entry) {
+      const index = Library.all().findIndex((e) => e.id === id);
+      libBegin(`delete “${entry.name}” from the library`);
+      Undo.recordLibrary({ removed: [{ entry: { ...entry }, index }] });
+    }
+    L.remove(id);
+    undoTouch();
+  }
+
+  function libMove(entryId, targetId, after = false) {
+    libBegin('reorder the library');
+    Undo.recordLibrary({ order: Library.all().map((e) => e.id) });
+    L.move(entryId, targetId, after);
+    undoTouch();
+  }
+
+  function libMoveBlock(ids, targetId, after = false) {
+    libBegin(ids && ids.length > 1 ? `move ${ids.length} presets in the library` : 'reorder the library');
+    Undo.recordLibrary({ order: Library.all().map((e) => e.id) });
+    L.moveBlock(ids, targetId, after);
+    undoTouch();
+  }
+
+  /** Modifica di un campo della libreria (nome, categoria, corpo, voto). */
+  function libUpdateFields(id, patch, label) {
+    const entry = Library.get(id);
+    if (entry) {
+      const prev = {};
+      for (const k of Object.keys(patch)) prev[k] = entry[k];
+      if (Object.keys(prev).length) {
+        libBegin(label);
+        Undo.recordLibrary({ fields: new Map([[id, prev]]) });
+      }
+    }
+    return L.update(id, patch);
+  }
+
+  function libSetRating(id, rating) {
+    const entry = Library.get(id);
+    if (entry) {
+      libBegin('change a rating');
+      Undo.recordLibrary({ fields: new Map([[id, { rating: entry.rating }]]) });
+    }
+    L.setRating(id, rating);
+    undoTouch();
+  }
+
+  // --- ripristino ----------------------------------------------------------
+
+  /** Riporta la libreria com'era: campi, voci rimosse (in posizione) e ordine. */
+  function undoLibrary(lib) {
+    let fatti = 0;
+    // le voci aggiunte (import dal device) vanno tolte di nuovo
+    for (const id of (lib.added || [])) {
+      if (Library.get(id)) { L.remove(id); fatti++; }
+    }
+    for (const [id, prev] of lib.fields) {
+      if (Library.get(id)) { L.update(id, prev); fatti++; }
+    }
+    for (const r of lib.removed) {
+      const e = r.entry;
+      if (!e || Library.get(e.id)) continue;
+      L.addAt({
+        name: e.name, category: e.category, p1: e.p1, slot: e.sourceSlot,
+        characteristics: e.characteristics,
+        rawHeader: e.rawHeaderB64 ? Mfp.b64ToBytes(e.rawHeaderB64) : null,
+        data: e.dataB64 ? Mfp.b64ToBytes(e.dataB64) : null,
+      }, {
+        catName: e.catName, tags: e.tags, favorite: e.favorite, rating: e.rating,
+        notes: e.notes, sourceName: e.sourceName, collectionId: e.collectionId,
+      }, r.index);
+      fatti++;
+    }
+    if (lib.order) {
+      const presenti = new Set(Library.all().map((e) => e.id));
+      for (let i = 0; i < lib.order.length; i++) {
+        const want = lib.order[i];
+        if (!presenti.has(want)) continue;
+        const cur = Library.all()[i];
+        if (!cur || cur.id === want) continue;
+        const prima = i > 0 ? lib.order[i - 1] : null;
+        if (prima != null && Library.get(prima)) L.move(want, prima, true);
+        else L.move(want, cur.id, false);
+        fatti++;
+      }
+    }
+    renderLibrary();
+    return fatti;
+  }
+
+  /** Annulla l'ultima operazione, con conferma e riepilogo di cosa verrà toccato. */
+  async function performUndo() {
+    const tx = Undo.peek();
+    if (!tx) return toast('Nothing to undo.', 'err');
+    // L'annullamento della sola libreria non tocca il synth: resta possibile
+    // anche mentre l'app è occupata (per esempio durante la scansione dei 512
+    // slot, che dura a lungo). Per gli slot servono le porte libere.
+    const toccaSynth = tx.presets.size > 0 || tx.wavetables.size > 0 || tx.samples.size > 0;
+    if (toccaSynth) {
+      if (!Midi.isOpen()) return toast('Connect to the MicroFreak first.', 'err');
+      if (state.busy || auditionBusy) {
+        return toast('The MicroFreak is busy (scanning?): try again when it finishes.', 'err', 5000);
+      }
+    }
+    const dettagli = Undo.describe(tx).map((d) => `<p class="undo-op-line">${esc(d)}</p>`).join('');
+    const avvisi = Undo.notes(tx).map((n) => `<p class="muted">${esc(n)}</p>`).join('');
+    const yes = await showModal('Undo the last operation?', `
+      <p class="undo-op-label">Operation</p>
+      ${dettagli}
+      <p class="undo-op-note">Undoing restores the content to the previous state.</p>
+      ${avvisi}`,
+      { okLabel: 'Undo' });
+    if (!yes) return;
+
+    const preso = Undo.take();
+    setBusy(true, 'Undoing…');
+    el.btnCancel.classList.remove('hidden');
+    state.cancelRequested = false;
+    let errori = 0;
+    try {
+      if (preso.library) undoLibrary(preso.library);
+
+      const slots = [...preso.presets.keys()].sort((a, b) => a - b);
+      for (let i = 0; i < slots.length; i++) {
+        if (state.cancelRequested) break;
+        const slot = slots[i];
+        const prev = preso.presets.get(slot);
+        setProgress((i + 1) / Math.max(1, slots.length), `Slot ${slot}…`);
+        try {
+          if (prev && prev.data) {
+            await MF.writePreset(slot, { name: prev.name, category: prev.category, p1: prev.p1, data: prev.data }, { timeoutMs: 4000 }); // undo-direct
+          } else {
+            if (!initTemplateCache) initTemplateCache = await MF.readInitTemplate(4000); // undo-direct
+            if (!initTemplateCache || !initTemplateCache.data) throw new Error('Init template unavailable');
+            await MF.writePreset(slot, { name: 'Init', category: 0, p1: 0, data: initTemplateCache.data }, { timeoutMs: 4000 }); // undo-direct
+          }
+          const h = await MF.readHeader(slot, 4000); // undo-direct
+          if (state.device) state.device[slot - 1] = h;
+        } catch { errori++; }
+      }
+
+      for (const [slot, prev] of preso.wavetables) {
+        try {
+          if (prev && prev.data) await MF.writeWavetable(slot, { name: prev.name, data: prev.data }, { timeoutMs: 8000 }); // undo-direct
+          else await MF.clearWavetable(slot); // undo-direct
+        } catch { errori++; }
+      }
+      for (const [slot, prev] of preso.samples) {
+        try {
+          if (prev && prev.data) await MF.writeSample(slot, prev.name, prev.data, { timeoutMs: 20000 }); // undo-direct
+          else await MF.clearSample(slot); // undo-direct
+        } catch { errori++; }
+      }
+
+      renderDevice();
+      const parti = [];
+      if (preso.presets.size) parti.push(`${preso.presets.size} slot`);
+      if (preso.wavetables.size) parti.push(`${preso.wavetables.size} wavetable`);
+      if (preso.samples.size) parti.push(`${preso.samples.size} sample`);
+      if (preso.library) parti.push('library');
+      toast(errori
+        ? `Undo finished with ${errori} error${errori === 1 ? '' : 's'}: ${parti.join(', ')}`
+        : `Undone ✓ (${parti.join(', ') || 'nothing'})`,
+      errori ? 'err' : 'ok', errori ? 7000 : 3500);
+    } finally {
+      setBusy(false);
+      setProgress(null);
+      el.btnCancel.classList.add('hidden');
+      renderUndoButton();
+    }
+  }
+
+  /**
+   * Invio multiplo dalla libreria: trascinando una selezione su uno slot del
+   * synth conferma l'intervallo e scrive i preset negli slot consecutivi.
+   * Nessuno shift, nessun riordino: solo scritture con sovrascrittura.
+   */
+  async function writeSelectionToSlots(ids, startSlot) {
+    const selected = ids.map((id) => Library.get(id)).filter((e) => e && e.data);
+    if (!selected.length) return toast('Nothing to send.', 'err');
+    const usable = selected.filter((e) => !isInitNamed(e));
+    const initCount = selected.length - usable.length;
+    if (!usable.length) {
+      return toast('The selected presets are all Init: the firmware template has no editable fields.', 'err', 6000);
+    }
+    const room = Math.max(0, 512 - startSlot + 1);
+    const fitting = Math.min(usable.length, room);
+    const over = usable.length - fitting;
+    const est = Math.max(1, Math.round((fitting * 1.1) / 60));
+    // l'elenco mostra TUTTE le posizioni coinvolte (scorre dentro la finestra):
+    // prima si fermava a 25 righe con "…and N more", che nascondeva proprio gli
+    // slot che vengono sovrascritti
+    const planItems = usable.slice(0, fitting).map((e, i) => ({ slot: startSlot + i, name: e.name }));
+    const yes = await showModal(
+      fitting === 1 ? 'Send 1 preset to the MicroFreak?' : `Send ${fitting} presets to the MicroFreak?`,
+      `<p>${fitting} preset${fitting === 1 ? '' : 's'} will be written to slot${fitting === 1 ? '' : 's'}
+         <strong>${startSlot}–${startSlot + fitting - 1}</strong>.</p>
+       ${slotPlanHtml(planItems)}
+       ${over ? `<p class="muted">${over} preset${over === 1 ? '' : 's'} do not fit before slot 512 and will not be sent.</p>` : ''}
+       ${initCount ? `<p class="muted">${initCount} Init preset${initCount === 1 ? '' : 's'} will be skipped.</p>` : ''}
+       <p class="muted">For every slot in the list the current content is read as a backup before writing,
+         and restored if the verification fails. About ${est} min. Nothing is shifted.</p>`,
+      { okLabel: 'Send to MicroFreak' }
+    );
+    if (!yes) return;
+    await writeEntriesToSlots(usable.map((e) => e.id), startSlot, { busyLabel: 'Sending presets…' });
+  }
+
+  /**
+   * Carica una libreria (o tutta la raccolta) sul MicroFreak a partire da uno
+   * slot scelto dall'utente. Scrittura sequenziale con sovrascrittura: nessuno
+   * shift, nessun riordino (il ciclo è quello condiviso qui sopra).
+   */
+  async function uploadLibraryToDevice() {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    const usable = Library.all().filter((e) => e.dataB64 && !isInitNamed(e));
+    if (!usable.length) return toast('The library is empty.', 'err');
+
+    const collections = (Library.allCollections ? Library.allCollections() : []) || [];
+    // il menu parte dalla libreria che l'utente sta guardando in questo momento,
+    // non da "All libraries": mandare tutta la libreria quando ne hai una
+    // selezionata è quasi sempre un errore
+    const filtrata = state.filterCollection && state.filterCollection !== 'all' && state.filterCollection !== 'none'
+      ? String(state.filterCollection)
+      : '';
+    const corrente = filtrata && collections.some((c) => String(c.id) === filtrata) ? filtrata : '';
+    const colOpts = [`<option value=""${corrente ? '' : ' selected'}>All libraries</option>`]
+      .concat(collections.map((c) =>
+        `<option value="${esc(c.id)}"${String(c.id) === corrente ? ' selected' : ''}>${esc(c.name)}</option>`))
+      .join('');
+
+    const pick = { collectionId: corrente, start: 1 };
+    // gli id delle librerie sono numeri, ma il valore di un <select> è sempre una
+    // stringa: confrontarli con === non trovava mai nulla (bug segnalato da un utente)
+    const sameCollection = (e, id) =>
+      e.collectionId !== null && e.collectionId !== undefined && String(e.collectionId) === String(id);
+    const subset = () =>
+      (pick.collectionId ? usable.filter((e) => sameCollection(e, pick.collectionId)) : usable);
+
+    const renderPreview = () => {
+      const list = subset();
+      const room = Math.max(0, 512 - pick.start + 1);
+      const fitting = Math.min(list.length, room);
+      const over = list.length - fitting;
+      const box = document.getElementById('ul-preview');
+      if (!box) return;
+      if (!list.length) {
+        box.innerHTML = '<span style="color:var(--red)">No presets in this library.</span>';
+        return;
+      }
+      const est = Math.max(1, Math.round((fitting * 1.1) / 60));
+      // anteprima riga per riga di TUTTE le posizioni (slot, preset che si invia,
+      // preset presente che verrà sovrascritto): l'elenco scorre dentro la finestra,
+      // così si vede per intero cosa viene toccato
+      const previewItems = list.slice(0, fitting).map((e, i) => ({ slot: pick.start + i, name: e.name }));
+      box.innerHTML =
+        `<strong>${fitting}</strong> preset${fitting === 1 ? '' : 's'} will be written to slot` +
+        `${fitting === 1 ? '' : 's'} <strong>${pick.start}–${pick.start + fitting - 1}</strong>` +
+        (over ? ` — <span style="color:var(--yellow)">${over} do not fit before slot 512 and will be left out</span>` : '') +
+        `.<br>About ${est} min. Each slot is backed up before writing and restored if the verification fails. ` +
+        `Nothing is shifted.` +
+        slotPlanHtml(previewItems);
+    };
+
+    const modalPromise = showModal(
+      'Send library to MicroFreak',
+      `<div class="field"><label for="ul-col">Which library?</label>
+         <select id="ul-col">${colOpts}</select></div>
+       <div class="field"><label for="ul-start">First slot on the MicroFreak (1–512)</label>
+         <input id="ul-start" type="number" min="1" max="512" value="1" /></div>
+       <div id="ul-preview" class="vol-note"></div>`,
+      {
+        okLabel: 'Send to MicroFreak',
+        onOk: () => {
+          const start = parseInt((document.getElementById('ul-start') || {}).value, 10);
+          if (!start || start < 1 || start > 512) {
+            toast('Invalid slot (1–512).', 'err');
+            return false;
+          }
+          pick.start = start;
+          if (!subset().length) {
+            toast('No presets in this library.', 'err');
+            return false;
+          }
+          return true;
+        },
+      }
+    );
+    const colSel = document.getElementById('ul-col');
+    const startInp = document.getElementById('ul-start');
+    if (colSel) colSel.addEventListener('change', () => { pick.collectionId = colSel.value; renderPreview(); });
+    if (startInp) startInp.addEventListener('input', () => {
+      pick.start = Math.min(512, Math.max(1, parseInt(startInp.value, 10) || 1));
+      renderPreview();
+    });
+    renderPreview();
+
+    const yes = await modalPromise;
+    if (!yes) return;
+
+    const wanted = subset();
+    // il ciclo di scrittura (backup, verifica, ripristino) è condiviso con
+    // l'invio multiplo dalla libreria: una sola implementazione da mantenere
+    await writeEntriesToSlots(wanted.map((e) => e.id), pick.start, { busyLabel: 'Uploading library…' });
   }
 
   // ------------------------------------------------------------------ scansione dispositivo
@@ -835,6 +1655,7 @@ const App = (() => {
   // ------------------------------------------------------------------ scrittura con guardia
 
   async function writeToSlot(slot, entry, { selectAfter = true } = {}) {
+    undoWillDo(`write “${entry.name}” to slot ${slot}`);
     if (!Midi.isOpen()) {
       toast('Connect the MIDI ports first.', 'err');
       return false;
@@ -854,7 +1675,7 @@ const App = (() => {
         backupSlot = slot;
       }
 
-      await MF.writePreset(slot, {
+      await devWritePreset(slot, {
         name: entry.name,
         category: entry.category >= 0 ? entry.category : 0,
         p1: entry.p1 !== undefined ? entry.p1 : 0,
@@ -877,7 +1698,12 @@ const App = (() => {
         state.device[slot - 1] = rb;
         renderDevice();
       }
-      if (selectAfter) MF.selectPreset(slot);
+      if (selectAfter) {
+        MF.selectPreset(slot);
+        // il synth cambia patch ma non lo dice a nessuno: la lista a destra deve
+        // mostrare quale preset è diventato quello corrente
+        markDeviceSlotAsCurrent(slot);
+      }
       toast(`"${entry.name}" written to slot ${slot} ✓`, 'ok');
       return true;
     } catch (e) {
@@ -885,7 +1711,7 @@ const App = (() => {
       if (backup && backup.data) {
         status('Restoring original content…');
         try {
-          await MF.writePreset(slot, {
+          await devWritePreset(slot, {
             name: backup.name,
             category: backup.category,
             p1: backup.p1,
@@ -908,7 +1734,7 @@ const App = (() => {
       `Write "${entry.name}" to the device`,
       `<p>Which slot should the preset be written to? (1–512)</p>
        <input id="m-slot" type="number" min="1" max="512" value="1" />
-       <p class="muted" style="font-size:12px">The current slot content is read as a backup
+       <p class="muted">The current slot content is read as a backup
        and restored automatically if verification fails.</p>
        <label><input type="checkbox" id="m-select" checked /> Select the preset on the synth after writing</label>`,
       {
@@ -1085,27 +1911,62 @@ const App = (() => {
     });
   }
 
-  async function readDeviceSelectionToLibrary() {
-    const slots = deviceSelIds().filter((s) => {
+  /**
+   * Legge uno o più slot del synth e li aggiunge alla libreria del PC.
+   * Usata dal pulsante "Fetch library to PC" (legge la selezione) e dal
+   * trascinamento di una selezione multipla sulla libreria.
+   *
+   * @param {{slots?: number[], insertIndex?: number|null}} opts
+   */
+  async function readDeviceSelectionToLibrary({ slots: slotsArg = null, insertIndex = null } = {}) {
+    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
+    const wanted = slotsArg || deviceSelIds();
+    const slots = wanted.filter((s) => {
       const h = state.device && state.device[s - 1];
       return h && !h.empty && !h.error && !isInitNamed(h);
     });
     if (!slots.length) return toast('No occupied (non-Init) slots among the selection.', 'err');
-    if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
-    setBusy(true, `Reading ${slots.length} slots…`);
+
+    const etichetta = `add ${slots.length} preset${slots.length === 1 ? '' : 's'} to the library`;
+    undoWillDo(etichetta);
+    libBegin(etichetta);
+
+    setBusy(true, `Reading ${slots.length} slot${slots.length === 1 ? '' : 's'}…`);
+    el.btnCancel.classList.remove('hidden');
+    state.cancelRequested = false;
     const collectionId = targetCollectionId();
+    const creati = [];
     let added = 0;
-    for (const s of slots) {
-      try {
-        const preset = await MF.readPreset(s);
-        if (preset.data && !isInitNamed(preset)) {
-          Library.add(preset, { sourceName: `Device slot ${s}`, collectionId });
+    let failed = 0;
+    let index = Number.isFinite(insertIndex) ? insertIndex : null;
+    try {
+      for (let i = 0; i < slots.length; i++) {
+        if (state.cancelRequested) break;
+        const s = slots[i];
+        setProgress((i + 1) / slots.length, `Slot ${s} (${i + 1}/${slots.length})…`);
+        undoTouch(); // la voce resta aperta finché dura la lettura
+        try {
+          const preset = await MF.readPreset(s, { timeoutMs: 4000 });
+          if (!preset.data || isInitNamed(preset)) { failed++; continue; }
+          const extra = { sourceName: `Device slot ${s}`, collectionId };
+          const entry = index === null ? Library.add(preset, extra) : Library.addAt(preset, extra, index);
+          if (index !== null) index++;
+          if (entry && entry.id !== undefined) creati.push(entry.id);
           added++;
+        } catch {
+          failed++;
         }
-      } catch { /* continue with the next one */ }
+      }
+      if (creati.length) Undo.recordLibrary({ added: creati });
+      toast(`Added ${added} preset${added === 1 ? '' : 's'} to the library` +
+        `${failed ? `, ${failed} skipped` : ''}${state.cancelRequested ? ' (cancelled)' : ''} ✓`,
+      'ok', 5000);
+      renderLibrary();
+    } finally {
+      setBusy(false);
+      setProgress(null);
+      el.btnCancel.classList.add('hidden');
     }
-    setBusy(false);
-    toast(`Added ${added} presets to the library ✓`, 'ok');
   }
 
   /**
@@ -1115,6 +1976,8 @@ const App = (() => {
    * volume in dB, poi scrive ogni patch modificata e verifica il readback.
    */
   async function setVolumeOnDeviceSelection(slotsArg) {
+    const volCount = (slotsArg || deviceSelIds()).length;
+    undoWillDo(`change the volume of ${volCount} preset${volCount === 1 ? '' : 's'}`);
     if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
     if (!state.device) return toast('Scan the preset names first.', 'err');
     // anche i preset Init hanno un corpo (il template del firmware) e il loro
@@ -1227,7 +2090,7 @@ const App = (() => {
         const newData = Params.setFieldValue(preset.data, Params.VOLUME_KEY, raw);
         setProgress((i + 0.5) / rows.length, `Slot ${slot}: ${curLabel} → ${targetLabel}…`);
         try {
-          await MF.writePreset(slot, {
+          await devWritePreset(slot, {
             name: preset.name,
             category: preset.category,
             p1: preset.p1,
@@ -1292,7 +2155,7 @@ const App = (() => {
       `<p><strong>${validMoved.length} presets</strong> will be moved:
          <strong>${esc(movedNames.join(', '))}</strong></p>
        <p>Position: <strong>${after ? 'after' : 'before'} "${esc(targetName)}"</strong>.</p>
-       <p class="muted" style="font-size:12px">The other presets will be <strong>shifted accordingly</strong>
+       <p class="muted">The other presets will be <strong>shifted accordingly</strong>
        (this is not a one-to-one swap). All involved presets are read as backups and restored on error.
        This may take a few minutes and can be cancelled.</p>`,
       { okLabel: 'Move & shift' }
@@ -1321,7 +2184,7 @@ const App = (() => {
         if (state.cancelRequested) throw new Error('Operation cancelled');
         const w = writes[k];
         const preset = backup.get(w.from);
-        await MF.writePreset(w.to, {
+        await devWritePreset(w.to, {
           name: preset.name,
           category: preset.category,
           p1: preset.p1,
@@ -1372,7 +2235,7 @@ const App = (() => {
         status('Restoring the original presets…');
         try {
           for (const [from, preset] of backup) {
-            await MF.writePreset(from, {
+            await devWritePreset(from, {
               name: preset.name,
               category: preset.category,
               p1: preset.p1,
@@ -1407,14 +2270,14 @@ const App = (() => {
       const yes = await showModal(
         `Swap slots ${a} and ${b}?`,
         `<p><strong>"${esc(pa.name)}"</strong> (slot ${a}) ⇄ <strong>"${esc(pb.name)}"</strong> (slot ${b})</p>
-         <p class="muted" style="font-size:12px">One-to-one swap: both presets are read as backups
+         <p class="muted">One-to-one swap: both presets are read as backups
          and restored on error.</p>`,
         { okLabel: 'Swap' }
       );
       if (!yes) return;
 
-      await MF.writePreset(b, { name: pa.name, category: pa.category, p1: pa.p1, data: pa.data }, { timeoutMs: 4000 });
-      await MF.writePreset(a, { name: pb.name, category: pb.category, p1: pb.p1, data: pb.data }, { timeoutMs: 4000 });
+      await devWritePreset(b, { name: pa.name, category: pa.category, p1: pa.p1, data: pa.data }, { timeoutMs: 4000 });
+      await devWritePreset(a, { name: pb.name, category: pb.category, p1: pb.p1, data: pb.data }, { timeoutMs: 4000 });
 
       const rbA = await MF.readPreset(a, { timeoutMs: 4000 });
       const rbB = await MF.readPreset(b, { timeoutMs: 4000 });
@@ -1433,8 +2296,8 @@ const App = (() => {
       if (pa && pb && pa.data && pb.data) {
         status('Restoring the original presets…');
         try {
-          await MF.writePreset(a, { name: pa.name, category: pa.category, p1: pa.p1, data: pa.data }, { timeoutMs: 4000 });
-          await MF.writePreset(b, { name: pb.name, category: pb.category, p1: pb.p1, data: pb.data }, { timeoutMs: 4000 });
+          await devWritePreset(a, { name: pa.name, category: pa.category, p1: pa.p1, data: pa.data }, { timeoutMs: 4000 });
+          await devWritePreset(b, { name: pb.name, category: pb.category, p1: pb.p1, data: pb.data }, { timeoutMs: 4000 });
           toast('Original presets restored ✓', 'ok');
         } catch (e2) {
           toast('WARNING: even the restore failed! (' + (e2.message || e2) + ')', 'err', 8000);
@@ -1448,6 +2311,8 @@ const App = (() => {
   /** Initializes (deletes) one or more presets on the device by writing the
    *  firmware Init template. With backup, confirmation and verification. */
   async function initDeviceSlots(slots) {
+    const initCount = (Array.isArray(slots) ? slots : [slots]).length;
+    undoWillDo(`initialize ${initCount} preset${initCount === 1 ? '' : 's'} as Init`);
     if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
     const occupiedSlots = (Array.isArray(slots) ? slots : [slots]).filter((s) => {
       const h = state.device && state.device[s - 1];
@@ -1458,9 +2323,9 @@ const App = (() => {
     const yes = await showModal(
       `Initialize ${occupiedSlots.length} presets on the MicroFreak?`,
       `<p>The selected slots will be reset to the <strong>Init</strong> preset (default sound).</p>
-       <p class="muted" style="font-size:12px">The MicroFreak protocol cannot create a truly "empty" slot:
-       the preset is replaced by the firmware's Init. Each preset is backed up before proceeding,
-       but the operation is still irreversible for the previous sound.</p>`,
+       <p class="muted">The MicroFreak protocol cannot create a truly "empty" slot:
+       the preset is replaced by the firmware's Init. Each preset is backed up first, and the
+       previous sound can be brought back afterwards with <strong>↩ Undo</strong>.</p>`,
       { okLabel: 'Initialize' }
     );
     if (!yes) return;
@@ -1484,7 +2349,7 @@ const App = (() => {
       for (let i = 0; i < occupiedSlots.length; i++) {
         if (state.cancelRequested) throw new Error('Operation cancelled');
         const s = occupiedSlots[i];
-        await MF.writePreset(s, { name: 'Init', category: 0, p1: 0, data: template.data }, { timeoutMs: 4000 });
+        await devWritePreset(s, { name: 'Init', category: 0, p1: 0, data: template.data }, { timeoutMs: 4000 });
         setProgress((i + 1) / occupiedSlots.length, `Init slot ${s}…`);
       }
 
@@ -1509,7 +2374,7 @@ const App = (() => {
         try {
           for (const [s, p] of backups) {
             if (p && p.data) {
-              await MF.writePreset(s, { name: p.name, category: p.category, p1: p.p1, data: p.data }, { timeoutMs: 4000 });
+              await devWritePreset(s, { name: p.name, category: p.category, p1: p.p1, data: p.data }, { timeoutMs: 4000 });
             }
           }
           toast('Original presets restored ✓', 'ok');
@@ -1538,7 +2403,7 @@ const App = (() => {
       { okLabel: 'Delete' }
     );
     if (!ok) return;
-    for (const id of ids) Library.remove(id);
+    for (const id of ids) libRemove(id);
     state.selLib.clear();
     state.selAnchor = null;
     updateSelectionUI();
@@ -1557,11 +2422,13 @@ const App = (() => {
         return;
       }
       // scrolla il contenitore sotto il cursore (slot list o libreria PC)
+      const lx = toLayout(info.x);
+      const ly = toLayout(info.y);
       let container = null;
       for (const c of [el.slotList, el.libGrid]) {
         if (!c) continue;
         const r = c.getBoundingClientRect();
-        if (info.x >= r.left && info.x <= r.right && info.y >= r.top && info.y <= r.bottom) {
+        if (lx >= r.left && lx <= r.right && ly >= r.top && ly <= r.bottom) {
           container = c;
           break;
         }
@@ -1570,8 +2437,8 @@ const App = (() => {
       const rect = container.getBoundingClientRect();
       const zone = 56;
       let delta = 0;
-      if (info.y < rect.top + zone) delta = -(zone - (info.y - rect.top));
-      else if (info.y > rect.bottom - zone) delta = zone - (rect.bottom - info.y);
+      if (ly < rect.top + zone) delta = -(zone - (ly - rect.top));
+      else if (ly > rect.bottom - zone) delta = zone - (rect.bottom - ly);
       if (delta) container.scrollTop += delta * 0.6;
     }, 35);
   }
@@ -1617,7 +2484,7 @@ const App = (() => {
       `<div class="field"><label>Name (max 14 characters)</label>
          <input id="m-name" type="text" maxlength="14" value="${esc(h.name)}" /></div>
        <div class="field"><label>Category</label><select id="m-cat">${cats}</select></div>
-       <p class="muted" style="font-size:12px">Renaming only updates the header on the device (the sound is untouched).</p>`,
+       <p class="muted">Renaming only updates the header on the device (the sound is untouched).</p>`,
       { okLabel: 'Rename' }
     );
     if (!ok) return;
@@ -1714,7 +2581,7 @@ const App = (() => {
         star.addEventListener('click', (e) => {
           e.stopPropagation();
           const k = parseInt(star.dataset.star, 10);
-          Library.setRating(id, cur && cur.rating === k ? 0 : k);
+          libSetRating(id, cur && cur.rating === k ? 0 : k);
           renderLibrary();
           if (state.selLib.size === 1 && state.selLib.has(id)) showLibraryDetail(id);
         });
@@ -1774,12 +2641,12 @@ const App = (() => {
       if (!srcId || srcId === id) return;
       const rect = card.getBoundingClientRect();
       const after = isList()
-        ? e.clientY >= rect.top + rect.height / 2
-        : e.clientX >= rect.left + rect.width / 2;
+        ? toLayout(e.clientY) >= rect.top + rect.height / 2
+        : toLayout(e.clientX) >= rect.left + rect.width / 2;
       if (state.dragBlockIds && state.dragBlockIds.length > 1) {
-        Library.moveBlock(state.dragBlockIds, id, after);
+        libMoveBlock(state.dragBlockIds, id, after);
       } else {
-        Library.move(srcId, id, after);
+        libMove(srcId, id, after);
       }
     });
     card.querySelectorAll('[data-act]').forEach((btn) => {
@@ -1789,10 +2656,11 @@ const App = (() => {
         const entry = Library.get(id);
         if (!entry) return;
         if (act === 'fav') Library.toggleFavorite(id);
+        else if (act === 'audition') auditionPreset(entry, btn);
         else if (act === 'write') writeToSlotWithDialog(entry);
         else if (act === 'export') exportEntry(entry);
         else if (act === 'delete') {
-          Library.remove(id);
+          libRemove(id);
           state.selLib.delete(id);
           renderLibrary();
           syncDetailToSelection();
@@ -1899,6 +2767,22 @@ const App = (() => {
     if (row) row.scrollIntoView({ block: 'nearest' });
   }
 
+  /**
+   * Segna come "preset corrente" lo slot appena selezionato sul synth, aggiornando
+   * la lista dei preset a destra: il MicroFreak non risponde ai Program Change,
+   * quindi quella lista è l'unico posto dove si può vedere cosa sta suonando.
+   */
+  function markDeviceSlotAsCurrent(slot) {
+    if (!state.device || !state.device[slot - 1]) return;
+    state.selectedDeviceSlots = new Set([slot]);
+    state.devSelAnchor = slot;
+    renderDevice();
+    renderDeviceSelBar();
+    showDeviceDetail(slot);
+    const row = el.slotList.querySelector(`.slot-row[data-slot="${slot}"]`);
+    if (row) row.scrollIntoView({ block: 'nearest' });
+  }
+
   /** Aggiorna griglia, barra di selezione e pannello dettagli. */
   function updateSelectionUI() {
     renderLibrary();
@@ -1929,7 +2813,7 @@ const App = (() => {
         { okLabel: 'Delete' }
       );
       if (!ok) return;
-      for (const id of ids) Library.remove(id);
+      for (const id of ids) libRemove(id);
       state.selLib.clear();
       state.selAnchor = null;
       updateSelectionUI();
@@ -2129,7 +3013,7 @@ const App = (() => {
       const e = entries.find((x) => x.id === r.id);
       if (!e) continue;
       const newData = Params.setFieldValue(e.data, Params.VOLUME_KEY, raw);
-      Library.update(e.id, { dataB64: Mfp.bytesToB64(newData) });
+      libUpdateFields(e.id, { dataB64: Mfp.bytesToB64(newData) });
       done++;
     }
     const note = skipped ? ` (${skipped} skipped, no Volume field)` : '';
@@ -2188,6 +3072,7 @@ const App = (() => {
           <span class="row-tags">${chars}</span>
           <span class="row-coll">${collName ? esc(collName) : ''}</span>
           <span class="row-actions">
+            <button class="btn small" data-act="audition" title="Listen to this preset">▶</button>
             <button class="btn small" data-act="write" title="Send to MicroFreak">➡</button>
             <button class="btn small" data-act="export" title="Export .mfp">⭳</button>
             <button class="btn small" data-act="delete" title="Remove from library">Delete</button>
@@ -2207,6 +3092,7 @@ const App = (() => {
           </div>
           ${chars ? `<div class="char-chips">${chars}</div>` : ''}
           <div class="card-actions">
+            <button class="btn small" data-act="audition" title="Listen to this preset">▶</button>
             <button class="btn small" data-act="write" title="Send to MicroFreak">➡ Send</button>
             <button class="btn small" data-act="export" title="Export .mfp">⭳ .mfp</button>
             <button class="btn small" data-act="delete" title="Remove from library">Delete</button>
@@ -2474,7 +3360,7 @@ const App = (() => {
     });
     el.detailParams.innerHTML = params.length
       ? params.map((p) => `<div class="param-row"><span class="plabel">${esc(p.label)}</span><span class="pvalue">${esc(p.value)}</span></div>`).join('')
-      : '<div class="muted" style="font-size:12px">Preset body not available.</div>';
+      : '<div class="muted">Preset body not available.</div>';
   }
 
   function showDeviceDetail(slot) {
@@ -2579,12 +3465,12 @@ const App = (() => {
           const changed = await applyVolumeToLibraryEntries([entry]);
           if (changed) showLibraryDetail(id); // aggiorna il parametro Volume (dB)
         } },
-        { id: 'delete', label: 'Delete', run: () => { Library.remove(id); showDetailEmpty(); renderLibrary(); } },
+        { id: 'delete', label: 'Delete', run: () => { libRemove(id); showDetailEmpty(); renderLibrary(); } },
       ],
       params,
       extraHtml,
       onRename: (newName) => {
-        Library.update(id, { name: newName });
+        libUpdateFields(id, { name: newName });
         renderLibrary();
         showLibraryDetail(id);
       },
@@ -2601,7 +3487,7 @@ const App = (() => {
       catSel.addEventListener('change', () => {
         const v = catSel.value;
         const cat = v === '-1' ? -1 : parseInt(v, 10);
-        Library.update(id, { category: cat });
+        libUpdateFields(id, { category: cat });
         showLibraryDetail(id);
       });
     }
@@ -2633,7 +3519,7 @@ const App = (() => {
     if (!ok) return;
     const name = $('m-name').value.trim();
     const cat = $('m-cat').value;
-    Library.update(id, { name, category: cat === '-1' ? -1 : parseInt(cat, 10) });
+    libUpdateFields(id, { name, category: cat === '-1' ? -1 : parseInt(cat, 10) });
     renderLibrary();
     showLibraryDetail(id);
   }
@@ -2881,17 +3767,17 @@ const App = (() => {
           let v;
           if (isHorizontal) {
             // spostare il bordo verso l'alto espande i dettagli
-            v = startVar - (ev.clientY - startY);
+            v = startVar - (toLayout(ev.clientY) - toLayout(startY));
             v = Math.min(540, Math.max(120, v));
             root.style.setProperty('--h-detail', v + 'px');
           } else {
             if (which === 'side') {
               // trascinare il divisore verso destra allarga la colonna di sinistra
-              v = startVar + (ev.clientX - startX);
+              v = startVar + (toLayout(ev.clientX) - toLayout(startX));
               v = Math.min(420, Math.max(170, v));
             } else {
               // trascinare il divisore verso sinistra allarga la colonna di destra
-              v = startVar - (ev.clientX - startX);
+              v = startVar - (toLayout(ev.clientX) - toLayout(startX));
               v = Math.min(720, Math.max(300, v));
             }
             root.style.setProperty('--w-' + which, v + 'px');
@@ -3091,7 +3977,8 @@ const App = (() => {
       listEl.querySelectorAll('.wt-row').forEach((r) =>
         r.classList.remove('swap-over', 'write-over', 'drop-before', 'drop-after'));
     };
-    const resolveWtDrop = (clientY) => {
+    const resolveWtDrop = (clientYRaw) => {
+      const clientY = toLayout(clientYRaw);
       const rows = Array.from(listEl.querySelectorAll('.wt-row'));
       if (!rows.length) return null;
       let hit = null;
@@ -3224,6 +4111,7 @@ const App = (() => {
   }
 
   async function importWavetableIntoSlot(slot) {
+    undoWillDo(`write a wavetable into slot ${slot}`);
     if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
     let target = slot;
     if (target === null || target === undefined) {
@@ -3253,7 +4141,7 @@ const App = (() => {
     setBusy(true, `Substituting wavetable in slot ${target}…`);
     setProgress(0, 'Substituting wavetable…');
     try {
-      await MF.writeWavetable(target, { name: wt.name || 'Wavetable', data: wt.data }, {
+      await devWriteWavetable(target, { name: wt.name || 'Wavetable', data: wt.data }, {
         onProgress: (frac, label) => setProgress(frac, label),
       });
       delete state.wtData[target];
@@ -3270,13 +4158,14 @@ const App = (() => {
   }
 
   async function clearWavetableSlot(slot) {
+    undoWillDo(`clear wavetable slot ${slot}`);
     const ok = await showModal('Clear wavetable slot',
       `<p>Clear slot ${slot}? The wavetable will be removed from the MicroFreak.</p>`,
       { okLabel: 'Clear' });
     if (!ok) return;
     setBusy(true, `Clearing wavetable slot ${slot}…`);
     try {
-      await MF.clearWavetable(slot);
+      await devClearWavetable(slot);
       delete state.wtData[slot];
       if (state.wavetables) state.wavetables[slot - 1] = await MF.readWavetableHeader(slot);
       renderWavetables();
@@ -3405,7 +4294,8 @@ const App = (() => {
       list.querySelectorAll('.sm-row').forEach((r) =>
         r.classList.remove('swap-over', 'write-over', 'drop-before', 'drop-after'));
     };
-    const resolveSmDrop = (clientY) => {
+    const resolveSmDrop = (clientYRaw) => {
+      const clientY = toLayout(clientYRaw);
       const rows = Array.from(list.querySelectorAll('.sm-row'));
       if (!rows.length) return null;
       let hit = null;
@@ -3539,6 +4429,7 @@ const App = (() => {
   }
 
   async function importSampleIntoSlot(slot) {
+    undoWillDo(`write a sample into slot ${slot}`);
     if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
     let target = slot;
     if (target === null || target === undefined) {
@@ -3579,7 +4470,7 @@ const App = (() => {
     setBusy(true, `Substituting sample in slot ${target}…`);
     setProgress(0, 'Substituting sample…');
     try {
-      await MF.writeSample(target, name, data, {
+      await devWriteSample(target, name, data, {
         onProgress: (frac, label) => setProgress(frac, label),
       });
       delete state.smData[target];
@@ -3601,13 +4492,14 @@ const App = (() => {
   }
 
   async function clearSampleSlot(slot) {
+    undoWillDo(`clear sample slot ${slot}`);
     const ok = await showModal('Clear sample slot',
       `<p>Clear slot ${slot}? The sample will be removed from the MicroFreak memory.</p>`,
       { okLabel: 'Clear' });
     if (!ok) return;
     setBusy(true, `Clearing sample slot ${slot}…`);
     try {
-      await MF.clearSample(slot);
+      await devClearSample(slot);
       delete state.smData[slot];
       if (state.samples) state.samples[slot - 1] = await MF.readSampleHeader(slot);
       try {
@@ -4369,7 +5261,7 @@ const App = (() => {
     try {
       for (let i = 0; i < slots.length; i++) {
         try {
-          await MF.clearWavetable(slots[i]);
+          await devClearWavetable(slots[i]);
           delete state.wtData[slots[i]];
         } catch {
           failed++;
@@ -4400,7 +5292,7 @@ const App = (() => {
     try {
       for (let i = 0; i < slots.length; i++) {
         try {
-          await MF.clearSample(slots[i]);
+          await devClearSample(slots[i]);
           delete state.smData[slots[i]];
         } catch {
           failed++;
@@ -4451,11 +5343,11 @@ const App = (() => {
       swap ? `Swap wavetables?` : `Move ${validMoved.length} wavetable${validMoved.length === 1 ? '' : 's'}?`,
       swap
         ? `<p><strong>${esc(movedNames[0])}</strong> (slot ${validMoved[0]}) ⇄ <strong>${esc(targetName)}</strong> (slot ${targetSlot})</p>
-           <p class="muted" style="font-size:12px">One-to-one swap with backup, verification and automatic rollback.</p>`
+           <p class="muted">One-to-one swap with backup, verification and automatic rollback.</p>`
         : `<p><strong>${validMoved.length} wavetable${validMoved.length === 1 ? '' : 's'}</strong> will be moved:
              <strong>${esc(movedNames.join(', '))}</strong></p>
            <p>Position: <strong>${after ? 'after' : 'before'} "${esc(targetName)}"</strong>.</p>
-           <p class="muted" style="font-size:12px">The other wavetables will be shifted accordingly.
+           <p class="muted">The other wavetables will be shifted accordingly.
              All involved wavetables are read as backups and restored on error. This may take a while.</p>`,
       { okLabel: swap ? 'Swap' : 'Move & shift' }
     );
@@ -4511,12 +5403,12 @@ const App = (() => {
       swap ? `Swap samples?` : `Move ${validMoved.length} sample${validMoved.length === 1 ? '' : 's'}?`,
       swap
         ? `<p><strong>${esc(movedNames[0])}</strong> (slot ${validMoved[0]}) ⇄ <strong>${esc(targetName)}</strong> (slot ${targetSlot})</p>
-           <p class="muted" style="font-size:12px">One-to-one swap: only the directory entries are rewritten,
+           <p class="muted">One-to-one swap: only the directory entries are rewritten,
              the audio bodies never move. Backup, verification and automatic rollback included.</p>`
         : `<p><strong>${validMoved.length} sample${validMoved.length === 1 ? '' : 's'}</strong> will be moved:
              <strong>${esc(movedNames.join(', '))}</strong></p>
            <p>Position: <strong>${after ? 'after' : 'before'} "${esc(targetName)}"</strong>.</p>
-           <p class="muted" style="font-size:12px">Only the directory entries are rewritten (the audio bodies
+           <p class="muted">Only the directory entries are rewritten (the audio bodies
              stay in place), so this is fast even for large samples. Backup, verification and rollback included.</p>`,
       { okLabel: swap ? 'Swap' : 'Move & shift' }
     );
@@ -5074,6 +5966,7 @@ const App = (() => {
   }
 
   async function sendWavetableToDevice(id) {
+    undoWillDo('send a wavetable to the MicroFreak');
     if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
     const entry = state.wtLib.find((e) => e.id === id);
     if (!entry) return;
@@ -5087,7 +5980,7 @@ const App = (() => {
     setBusy(true, `Substituting wavetable in slot ${slot}…`);
     setProgress(0, 'Substituting wavetable…');
     try {
-      await MF.writeWavetable(slot, { name: entry.name, data: Mfp.b64ToBytes(entry.dataB64) }, {
+      await devWriteWavetable(slot, { name: entry.name, data: Mfp.b64ToBytes(entry.dataB64) }, {
         onProgress: (frac, label) => setProgress(frac, label),
       });
       delete state.wtData[slot];
@@ -5104,6 +5997,7 @@ const App = (() => {
   }
 
   async function sendSampleToDevice(id) {
+    undoWillDo('send a sample to the MicroFreak');
     if (!Midi.isOpen()) return toast('Connect the MIDI ports first.', 'err');
     const entry = state.smLib.find((e) => e.id === id);
     if (!entry) return;
@@ -5117,7 +6011,7 @@ const App = (() => {
     setBusy(true, `Substituting sample in slot ${slot}…`);
     setProgress(0, 'Substituting sample…');
     try {
-      await MF.writeSample(slot, entry.name, Mfp.b64ToBytes(entry.dataB64), {
+      await devWriteSample(slot, entry.name, Mfp.b64ToBytes(entry.dataB64), {
         onProgress: (frac, label) => setProgress(frac, label),
       });
       delete state.smData[slot];
@@ -5312,7 +6206,7 @@ const App = (() => {
          Samples (${backup.samples.length})</label></div>
        <div class="field"><label><input type="checkbox" id="rs-settings" checked />
          Device settings (${nGlobals})</label></div>
-       <p class="muted" style="font-size:12px">Settings take seconds; samples take minutes each (identical ones
+       <p class="muted">Settings take seconds; samples take minutes each (identical ones
          are skipped). Cancelling — or an error — keeps what has already been written, with one exception:
          a sample interrupted mid-transfer leaves <strong>that slot empty</strong> (the firmware needs a clean
          slot); its previous content is still in your backup file.</p>`,
@@ -5381,7 +6275,7 @@ const App = (() => {
         try {
           const want = Mfp.b64ToBytes(p.dataB64);
           armWatchdog();
-          await MF.writePreset(p.slot, { name: p.name, category: p.category, p1: p.p1, data: want }, { timeoutMs: 4000 });
+          await devWritePreset(p.slot, { name: p.name, category: p.category, p1: p.p1, data: want }, { timeoutMs: 4000 });
           // verifica: lo slot viene riletto e confrontato byte per byte
           const rb = await MF.readPreset(p.slot, { timeoutMs: 4000 });
           disarmWatchdog();
@@ -5407,7 +6301,7 @@ const App = (() => {
         if (state.cancelRequested) throw new Error('Operation cancelled');
         try {
           armWatchdog();
-          await MF.writeWavetable(w.slot, { name: w.name, data: Mfp.b64ToBytes(w.dataB64) }, {
+          await devWriteWavetable(w.slot, { name: w.name, data: Mfp.b64ToBytes(w.dataB64) }, {
             onProgress: itemProgress(`Wavetable ${w.slot}`),
             shouldCancel: abortItem,
           });
@@ -5441,7 +6335,7 @@ const App = (() => {
             continue;
           }
           armWatchdog();
-          await MF.writeSample(s.slot, s.name, Mfp.b64ToBytes(s.dataB64), {
+          await devWriteSample(s.slot, s.name, Mfp.b64ToBytes(s.dataB64), {
             onProgress: itemProgress(`Sample ${s.slot} (${s.name || ''})`),
             shouldCancel: abortItem,
           });
@@ -5603,8 +6497,16 @@ const App = (() => {
       }
     });
 
+    // stessa protezione della modale principale: si chiude solo se il click è
+    // iniziato sullo sfondo (evita chiusure accidentali mentre si seleziona testo)
+    let updatePressedOutside = false;
+    el.updateBackdrop.addEventListener('mousedown', (e) => {
+      updatePressedOutside = e.target === el.updateBackdrop;
+    });
     el.updateBackdrop.addEventListener('click', (e) => {
-      if (e.target === el.updateBackdrop && phase !== 'downloading') hide();
+      const startedOutside = updatePressedOutside;
+      updatePressedOutside = false;
+      if (startedOutside && e.target === el.updateBackdrop && phase !== 'downloading') hide();
     });
 
     window.mfapi.onUpdateEvent((ev) => {
@@ -5613,7 +6515,8 @@ const App = (() => {
           case 'available': {
             manualCheckPending = false;
             const notes = ev.releaseNotes || '';
-            el.updateChangelog.textContent = notes || 'No changelog available for this release.';
+            el.updateChangelog.innerHTML = Md.render(notes) || '<p>No changelog available for this release.</p>';
+            bindExternalLinks(el.updateChangelog);
             el.updateChangelog.classList.remove('hidden');
             el.updateTitle.textContent = `Update available — v${esc(ev.version)}`;
             el.updateBody.innerHTML = '<p>A new version of ManageFreak is ready. Your presets, libraries and settings are kept — only the application is replaced.</p>';
@@ -5705,10 +6608,99 @@ const App = (() => {
           : 'Changelog unavailable.';
         return;
       }
-      el.appMenuChangelog.textContent = rel.body || `No changelog for ${rel.version || 'the latest release'}.`;
+      el.appMenuChangelog.innerHTML = Md.render(rel.body) ||
+        `<p>No changelog for ${esc(rel.version || 'the latest release')}.</p>`;
     } catch {
       el.appMenuChangelog.textContent = 'Changelog unavailable.';
     }
+  }
+
+  // ------------------------------------------------------- menu ridimensionabile
+  // Il menu in alto a sinistra si può allargare trascinando l'angolo in basso a
+  // destra; la misura resta salvata. Il puntatore è in pixel visivi mentre il menu
+  // è in unità di layout, quindi il delta va diviso per lo zoom (come i pannelli).
+
+  const MENU_SIZE_KEY = 'managefreak-menu-size';
+  const MENU_MIN_W = 360;
+  const MENU_MIN_H = 220;
+
+  const menuZoom = () =>
+    Number(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
+
+  /** Applica la dimensione richiesta, dentro i limiti dello schermo. */
+  function applyMenuSize(w, h) {
+    if (!el.appMenu) return;
+    const z = menuZoom();
+    const maxW = Math.max(MENU_MIN_W, Math.floor(window.innerWidth / z) - 24);
+    const maxH = Math.max(MENU_MIN_H, Math.floor(window.innerHeight / z) - 90);
+    if (Number.isFinite(w)) el.appMenu.style.width = Math.round(Math.min(maxW, Math.max(MENU_MIN_W, w))) + 'px';
+    if (Number.isFinite(h)) el.appMenu.style.height = Math.round(Math.min(maxH, Math.max(MENU_MIN_H, h))) + 'px';
+  }
+
+  function saveMenuSize() {
+    if (!el.appMenu) return;
+    try {
+      localStorage.setItem(MENU_SIZE_KEY, JSON.stringify({
+        w: el.appMenu.offsetWidth,
+        h: el.appMenu.offsetHeight,
+      }));
+    } catch { /* storage non disponibile */ }
+  }
+
+  function loadMenuSize() {
+    try {
+      const s = JSON.parse(localStorage.getItem(MENU_SIZE_KEY) || 'null');
+      if (s && Number.isFinite(s.w)) applyMenuSize(s.w, s.h);
+    } catch { /* valori illeggibili: resta la misura predefinita */ }
+  }
+
+  function initMenuResize() {
+    const grip = document.getElementById('app-menu-resize');
+    if (!grip || !el.appMenu) return;
+    let attivo = false;
+    let startX = 0, startY = 0, startW = 0, startH = 0, z = 1;
+    grip.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const r = el.appMenu.getBoundingClientRect();
+      z = menuZoom();
+      startX = e.clientX;
+      startY = e.clientY;
+      startW = r.width;
+      startH = r.height;
+      attivo = true;
+      grip.classList.add('active');
+      document.body.classList.add('mf-menu-resizing');
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!attivo) return;
+      applyMenuSize(startW + (e.clientX - startX) / z, startH + (e.clientY - startY) / z);
+    });
+    document.addEventListener('mouseup', () => {
+      if (!attivo) return;
+      attivo = false;
+      grip.classList.remove('active');
+      document.body.classList.remove('mf-menu-resizing');
+      saveMenuSize();
+    });
+    // doppio clic sull'angolo: torna alla misura predefinita
+    grip.addEventListener('dblclick', () => {
+      el.appMenu.style.width = '';
+      el.appMenu.style.height = '';
+      try { localStorage.removeItem(MENU_SIZE_KEY); } catch { /* ignore */ }
+    });
+  }
+
+  /** Apre nel browser i link contenuti in un blocco renderizzato. */
+  function bindExternalLinks(container) {
+    if (!container || container.dataset.extBound === '1') return;
+    container.dataset.extBound = '1';
+    container.addEventListener('click', (e) => {
+      const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+      if (!a) return;
+      e.preventDefault();
+      window.mfapi.openExternal(a.href).catch(() => toast('Could not open the browser.', 'err', 5000));
+    });
   }
 
   function closeAppMenu() {
@@ -5717,14 +6709,32 @@ const App = (() => {
 
   function initAppMenu() {
     if (!el.appBrand || !el.appMenu) return;
+    // i link dentro il changelog si aprono nel browser, non nella finestra dell'app
+    bindExternalLinks(el.appMenuChangelog);
+    // angolo di ridimensionamento + misura salvata dalle sessioni precedenti
+    initMenuResize();
+    loadMenuSize();
     el.appBrand.addEventListener('click', (e) => {
       e.stopPropagation();
       if (el.appMenu.classList.contains('hidden')) openAppMenu();
       else closeAppMenu();
     });
-    // click fuori dal menu → chiudi
+    // click fuori dal menu → chiudi, ma solo se il click è INIZIATO fuori:
+    // selezionando il testo del changelog e rilasciando il mouse altrove il menu
+    // si chiudeva a metà selezione. Il menu stesso conta come "dentro": prima
+    // bastava cliccare sul changelog o sull'angolo di ridimensionamento per
+    // chiuderlo, il che rendeva impossibile sia leggere sia trascinare.
+    const dentroIlMenu = (t) => !!(t && t.closest && (t.closest('.brand-wrap') || t.closest('#app-menu')));
+    let menuPressedOutside = false;
+    document.addEventListener('mousedown', (e) => {
+      menuPressedOutside = !dentroIlMenu(e.target);
+    });
     document.addEventListener('click', (e) => {
-      if (!el.appMenu.classList.contains('hidden') && !e.target.closest('.brand-wrap')) closeAppMenu();
+      const startedOutside = menuPressedOutside;
+      menuPressedOutside = false;
+      if (!el.appMenu.classList.contains('hidden') && startedOutside && !dentroIlMenu(e.target)) {
+        closeAppMenu();
+      }
     });
     // Esc → chiudi (prima di qualunque altro handler)
     document.addEventListener('keydown', (e) => {
@@ -5759,7 +6769,7 @@ const App = (() => {
             if (res.hasUpdate) {
               const go = await showModal(`Update available — v${esc(res.latest)}`,
                 `<p>ManageFreak <strong>v${esc(res.latest)}</strong> is available (you have v${esc(res.current)}).</p>
-                 <p class="muted" style="font-size:12px">Automatic updates work on the installed Windows build only.
+                 <p class="muted">Automatic updates work on the installed Windows build only.
                  Download the new version from the releases page and install it as usual.</p>`,
                 { okLabel: 'Open download page' });
               if (go) window.mfapi.openExternal(res.url);
@@ -5771,6 +6781,16 @@ const App = (() => {
           manualCheckPending = false;
           toast('Update check failed: ' + (e.message || e), 'err', 6000);
         }
+      });
+    }
+    // sostegno al progetto: apre la pagina Ko-fi nel browser di sistema
+    const btnKofi = document.getElementById('btn-kofi');
+    if (btnKofi) {
+      btnKofi.addEventListener('click', () => {
+        closeAppMenu();
+        window.mfapi.openExternal(KOFI_URL).catch((e) => {
+          toast('Could not open the browser: ' + (e && e.message || e), 'err', 6000);
+        });
       });
     }
   }
@@ -5833,6 +6853,21 @@ const App = (() => {
       state.cancelRequested = true;
       toast('Cancellation requested…');
     });
+    // annullamento: pulsante nella barra in alto e Ctrl+Z
+    const btnUndo = document.getElementById('btn-undo');
+    if (btnUndo) btnUndo.addEventListener('click', () => performUndo());
+    renderUndoButton();
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+        // dentro i campi di testo Ctrl+Z deve restare l'annullamento del testo
+        const t = e.target;
+        const inCampo = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+        const modaleAperta = el.modalBackdrop && !el.modalBackdrop.classList.contains('hidden');
+        if (inCampo || modaleAperta) return;
+        e.preventDefault();
+        performUndo();
+      }
+    });
     el.btnImport.addEventListener('click', importFiles);
     el.btnBackup.addEventListener('click', backupLibrary);
 
@@ -5854,6 +6889,12 @@ const App = (() => {
       state.sortMode = e.target.value;
       renderLibrary();
     });
+
+    // ascolto rapido: impostazioni (slot di appoggio, nota, durata)
+    loadAuditionSettings();
+    renderAuditionButton();
+    const btnAudition = document.getElementById('btn-audition');
+    if (btnAudition) btnAudition.addEventListener('click', () => auditionSettingsDialog());
     el.deviceSearch.addEventListener('input', () => {
       state.deviceSearch = el.deviceSearch.value;
       renderDevice();
@@ -5934,9 +6975,9 @@ const App = (() => {
           const srcId = parseInt(e.dataTransfer.getData('application/x-managefreak'), 10);
           if (srcId && srcId !== t.id) {
             if (state.dragBlockIds && state.dragBlockIds.length > 1) {
-              Library.moveBlock(state.dragBlockIds, t.id, t.after);
+              libMoveBlock(state.dragBlockIds, t.id, t.after);
             } else {
-              Library.move(srcId, t.id, t.after);
+              libMove(srcId, t.id, t.after);
             }
           }
           state.dragBlockIds = null;
@@ -5949,6 +6990,14 @@ const App = (() => {
       const slot = slotStr ? parseInt(slotStr, 10) : 0;
       if (!slot) return;
       const insertIndex = libDropInsertIndex(e.clientX, e.clientY);
+      // trascinando una SELEZIONE dal synth si importano tutti gli slot scelti,
+      // non solo quello sotto il puntatore (prima arrivava soltanto il primo)
+      const blocco = state.dragDeviceBlock;
+      if (blocco && blocco.length > 1 && blocco.includes(slot)) {
+        state.dragDeviceBlock = null;
+        readDeviceSelectionToLibrary({ slots: blocco.slice(), insertIndex });
+        return;
+      }
       importDeviceSlotToLibrary(slot, insertIndex);
     });
 
@@ -5981,7 +7030,8 @@ const App = (() => {
       el.slotList.querySelectorAll('.slot-row').forEach((r) =>
         r.classList.remove('drag-over', 'swap-over', 'write-over', 'drop-before', 'drop-after'));
     };
-    const resolveSlotDrop = (clientY) => {
+    const resolveSlotDrop = (clientYRaw) => {
+      const clientY = toLayout(clientYRaw);
       const rows = Array.from(el.slotList.querySelectorAll('.slot-row'));
       if (!rows.length) return null;
       let hit = null;
@@ -6013,6 +7063,15 @@ const App = (() => {
     const handleSlotDrop = async (e, target) => {
       const entryId = e.dataTransfer.getData('application/x-managefreak');
       if (entryId) {
+        // selezione multipla trascinata dalla libreria: scrive tutti i preset
+        // selezionati negli slot consecutivi da quello sotto il puntatore.
+        // Nessuno shift: sono scritture con sovrascrittura, una per slot.
+        const block = state.dragBlockIds && state.dragBlockIds.length > 1 ? state.dragBlockIds : null;
+        if (block) {
+          state.dragBlockIds = null;
+          await writeSelectionToSlots(block, target.slot);
+          return;
+        }
         const entry = Library.get(parseInt(entryId, 10));
         if (!entry) return;
         // dico anche cosa viene sostituito: è una scrittura, non un inserimento
@@ -6186,6 +7245,8 @@ const App = (() => {
   // davvero le porte a livello di sistema, Windows le tiene occupate e l'istanza
   // successiva dell'app enumera zero dispositivi MIDI.
   const releaseMidi = () => {
+    // una nota lasciata in ascolto continuerebbe a suonare sul synth
+    try { stopAuditionNote(); } catch { /* niente da fermare */ }
     try { Midi.shutdown(); } catch { /* niente da fare mentre si esce */ }
   };
   window.addEventListener('beforeunload', releaseMidi);

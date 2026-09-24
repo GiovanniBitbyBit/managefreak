@@ -1,4 +1,4 @@
-﻿/* ManageFreak â€” stile */
+/* ManageFreak — stile */
 :root {
   /* zoom dell'interfaccia: 1 = 100%. Lo cambia il menu in alto o Ctrl +/-/0. */
   --ui-zoom: 1;
@@ -9,6 +9,9 @@
   --border: #2c2c3a;
   --text: #e8e6f0;
   --muted: #8d8aa0;
+  /* testo secondario nelle modali: più chiaro del --muted, perché lì dice cose
+     importanti (quali preset verranno riscritti, cosa succede ai dati) */
+  --muted-strong: #bdbacd;
   --accent: #ff8a3d;
   --accent2: #6d7bd6;
   --green: #43c47c;
@@ -36,6 +39,7 @@
   --border: #d7d7e2;
   --text: #26262f;
   --muted: #6d6d7d;
+  --muted-strong: #4a4a58;
   --accent: #e4701a;
   --accent2: #5a68c9;
   --green: #2ea867;
@@ -124,14 +128,50 @@ button, input, select, textarea {
   top: calc(100% + 6px);
   left: 0;
   z-index: 130;
-  width: 400px;
+  width: 560px; /* 40% in più dei 400px originali */
   max-width: calc(100vw / var(--ui-zoom) - 24px);
+  /* altezza DEFINITA (non solo massima): serve perché il changelog possa
+     prendersi lo spazio libero e scorrere dentro il suo riquadro, lasciando
+     zoom e pulsanti sempre visibili in fondo */
+  height: calc(72vh / var(--ui-zoom));
+  max-height: calc(100vh / var(--ui-zoom) - 90px);
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: 12px;
   box-shadow: 0 12px 32px rgba(0, 0, 0, .45);
   padding: 14px;
+  /* il contenuto scorre dentro, così il grip di ridimensionamento resta fisso
+     nell'angolo e il menu non si allunga oltre lo schermo */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
+/* Il contenuto non scorre come blocco unico: il changelog prende lo spazio
+   disponibile e scorre DENTRO il suo riquadro, mentre zoom e pulsanti restano
+   sempre visibili in fondo al menu. */
+.app-menu-scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+/* angolo di ridimensionamento (in basso a destra, come nelle finestre) */
+.app-menu-resize {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  opacity: .5;
+  border-radius: 0 0 10px 0;
+  background-image:
+    linear-gradient(135deg, transparent 0 44%, var(--muted) 44% 54%, transparent 54% 100%),
+    linear-gradient(135deg, transparent 0 66%, var(--muted) 66% 76%, transparent 76% 100%);
+}
+.app-menu-resize:hover, .app-menu-resize.active { opacity: 1; }
+body.mf-menu-resizing { cursor: nwse-resize; user-select: none; }
 .app-menu-title {
   display: flex;
   align-items: center;
@@ -153,11 +193,13 @@ button, input, select, textarea {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px 12px;
-  max-height: 200px;
+  /* cresce con lo spazio libero del menu e scorre al suo interno: allargando il
+     menu si legge di più, stringendolo i pulsanti sotto restano al loro posto */
+  flex: 1 1 auto;
+  min-height: 90px;
   overflow-y: auto;
   font-size: 12.5px;
   line-height: 1.45;
-  white-space: pre-wrap;
   word-break: break-word;
 }
 .app-menu-changelog h1, .app-menu-changelog h2, .app-menu-changelog h3 {
@@ -167,6 +209,14 @@ button, input, select, textarea {
 .app-menu-changelog ul { margin: 3px 0 3px 16px; padding: 0; }
 .app-menu-changelog p { margin: 4px 0; }
 .app-menu-actions { display: flex; gap: 8px; margin-top: 12px; }
+/* sostegno al progetto: azzurro Ko-fi, riconoscibile a colpo d'occhio */
+.btn.kofi {
+  background: #29abe0;
+  border-color: #29abe0;
+  color: #fff;
+  font-weight: 600;
+}
+.btn.kofi:hover { background: #47b9e8; border-color: #47b9e8; }
 .app-menu-note { font-size: 11px; color: var(--muted); margin-top: 10px; line-height: 1.35; }
 .app-menu-actions .app-menu-note { margin-top: 0; margin-right: auto; max-width: 240px; }
 /* comandi dello zoom: riga compatta nel menu dell'app */
@@ -204,6 +254,14 @@ select {
   cursor: pointer;
   transition: background .12s;
   white-space: nowrap;
+  /* Restringendo i pannelli il pulsante si accorcia: il testo deve essere
+     troncato con i puntini invece di uscire dai bordi. min-width: 0 serve perché
+     dentro un contenitore flex un elemento non scende sotto la misura del suo
+     contenuto, e senza quello l'ellissi non ha spazio per comparire. */
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .btn:hover { background: #2d2d3d; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #1a1208; font-weight: 600; }
@@ -451,7 +509,7 @@ select {
 .slot-row.drag-over { border-color: var(--accent); background: rgba(255, 138, 61, .08); }
 .slot-row.swap-over { border-color: var(--sel); background: var(--sel-bg); }
 /* indicatore di inserimento: UNA sola barretta, sempre nella stessa posizione,
-   centrata nel gap fra la riga sopra e quella sotto (non piÃ¹ un bordo interno
+   centrata nel gap fra la riga sopra e quella sotto (non più un bordo interno
    alla riga, che appariva "attaccato" all'uno o all'altro preset) */
 .slot-row, .lib-row, .wt-row, .sm-row { position: relative; }
 .slot-row.drop-before::after, .slot-row.drop-after::after,
@@ -525,6 +583,13 @@ select {
   font-weight: 600;
   background: var(--bg3);
   border: 1px solid var(--border);
+  /* come i pulsanti: nei pannelli stretti il testo va troncato, non sbordato */
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
 }
 
 /* ---------------------------------------------------------------- library */
@@ -534,7 +599,15 @@ select {
   align-items: center;
   gap: 10px;
 }
-.view-header-row h2 { flex: 1; }
+.view-header-row h2 {
+  flex: 1;
+  /* con pannello stretto il titolo si accorcia con i puntini invece di spingere
+     fuori i pulsanti che gli stanno accanto */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .sort-row {
   display: flex;
   align-items: center;
@@ -565,7 +638,7 @@ select {
   gap: 9px;
 }
 
-/* barra selezione multipla â€” colori della interfaccia, sticky */
+/* barra selezione multipla — colori della interfaccia, sticky */
 .sel-bar {
   display: flex;
   align-items: center;
@@ -610,7 +683,7 @@ select {
 
 /* indicatori di posizionamento durante il drag & drop */
 /* vista a griglia: barretta VERTICALE centrata nel gap fra due card
-   (stessa logica della vista a lista, ruotata di 90Â°) */
+   (stessa logica della vista a lista, ruotata di 90°) */
 .lib-card.drop-left::before,
 .lib-card.drop-right::before {
   content: '';
@@ -626,7 +699,7 @@ select {
 .lib-card.drop-right::before { right: -6.5px; }
 
 /* durante un trascinamento la riga sotto il puntatore non deve accendere anche
-   il proprio bordo/alone di hover: l'unica indicazione Ã¨ la barretta sopra */
+   il proprio bordo/alone di hover: l'unica indicazione è la barretta sopra */
 body.mf-dragging .lib-row:hover:not(.selected) { border-color: transparent; }
 body.mf-dragging .lib-card:hover:not(.selected) { border-color: transparent; transform: none; }
 body.mf-dragging .slot-row:hover:not(.selected) { background: transparent; }
@@ -826,7 +899,7 @@ body.mf-dragging .sm-row:hover:not(.selected) { background: transparent; }
   max-height: calc(80vh / var(--ui-zoom));
   overflow-y: auto;
 }
-.modal h3 { margin: 0 0 12px; }
+.modal h3 { margin: 0 0 12px; font-size: 17px; }
 #modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .modal input[type="text"], .modal input[type="number"], .modal textarea, .modal select {
   width: 100%;
@@ -836,7 +909,12 @@ body.mf-dragging .sm-row:hover:not(.selected) { background: transparent; }
   padding: 8px;
   margin: 4px 0 10px;
 }
-.modal label { font-size: 12px; color: var(--muted); }
+/* Testi delle modali: qui passano le informazioni che contano (quali preset
+   verranno riscritti, cosa succede ai dati), quindi niente 11-12px in grigio
+   scuro: corpo 14px e note a 13.5px con un grigio più chiaro. */
+.modal p { font-size: 14px; line-height: 1.5; }
+.modal .muted { font-size: 13.5px; line-height: 1.5; color: var(--muted-strong); }
+.modal label { font-size: 13px; color: var(--muted-strong); }
 .modal .field { margin-bottom: 8px; }
 
 /* ---------------------------------------------------------------- volume picker (dB) */
@@ -903,7 +981,20 @@ body.mf-dragging .sm-row:hover:not(.selected) { background: transparent; }
 .vsi-none { color: var(--muted); }
 .vsi-vol { color: var(--accent); font-weight: 600; white-space: nowrap; }
 .vsi-locked { color: var(--muted); font-weight: 400; font-style: italic; font-size: 11px; }
-.vol-note { font-size: 11px; color: var(--muted); margin: 4px 0 8px; }
+/* tabella dell'invio multiplo: slot → preset in arrivo → preset presente */
+.slot-plan .vol-summary-header,
+.slot-plan .vol-summary-item { grid-template-columns: 52px minmax(0, 1fr) minmax(0, 1fr); }
+/* l'elenco degli slot coinvolti è più alto del riepilogo volume: si scorre, ma
+   se ne vedono molti di più senza allungare la finestra */
+.slot-plan .vol-summary-body { max-height: 320px; }
+.slot-plan .vol-summary-header span:last-child,
+.slot-plan .vsi-over,
+.slot-plan .vsi-free,
+.slot-plan .vsi-none { text-align: left; }
+.vsi-slot { color: var(--muted-strong); font-variant-numeric: tabular-nums; }
+.vsi-over { color: var(--yellow); font-weight: 600; }
+.vsi-free { color: var(--green); font-weight: 600; }
+.vol-note { font-size: 13.5px; line-height: 1.5; color: var(--muted-strong); margin: 6px 0 10px; }
 .vol-warn {
   border: 1px solid var(--yellow);
   background: rgba(232, 162, 90, .12);
@@ -1142,11 +1233,11 @@ body.mf-dragging .sm-row:hover:not(.selected) { background: transparent; }
 
 /* ---------------------------------------------------------------- split a due pannelli (wavetable/sample) */
 /* Le due colonne (libreria PC e MicroFreak) scorrono in modo INDIPENDENTE:
-   la vista non scorre piÃ¹ come un blocco unico, cosÃ¬ la libreria resta
+   la vista non scorre più come un blocco unico, così la libreria resta
    visibile mentre si scorre l'elenco del device. */
 #content.tab-wavetables,
 #content.tab-samples {
-  overflow: hidden; /* lo scroll Ã¨ dei singoli pannelli */
+  overflow: hidden; /* lo scroll è dei singoli pannelli */
   display: flex;
   flex-direction: column;
 }
@@ -1391,4 +1482,124 @@ body.mf-dragging .sm-row:hover:not(.selected) { background: transparent; }
 @media (max-width: 1000px) {
   .dev-cols { grid-template-columns: 1fr; }
   .pane-split { grid-template-columns: 1fr; }
+}
+
+/* ---------------------------------------------------------------- bersaglio di drag
+   Le regole delle righe Init/vuote, piu in basso nel foglio, hanno la stessa
+   specificita di .slot-row.swap-over e quindi vincevano: su uno slot Init o vuoto
+   il bersaglio del drop non mostrava alcuna evidenziazione. In piu l'hover durante
+   il trascinamento (body.mf-dragging .slot-row:hover) ha specificita superiore e
+   cancellava lo sfondo. Queste regole, in fondo al file, vincono sempre. */
+.slot-row.swap-over,
+.slot-row.swap-over:hover,
+.slot-row.empty-row.swap-over,
+.slot-row.init-row.swap-over,
+.slot-row.selected.empty-row.swap-over,
+.slot-row.selected.init-row.swap-over,
+body.mf-dragging .slot-row.swap-over,
+body.mf-dragging .slot-row.swap-over:hover {
+  background: var(--sel-bg);
+  border-color: var(--sel);
+}
+.slot-row.swap-over .slot-name,
+.slot-row.empty-row.swap-over .slot-name,
+.slot-row.init-row.swap-over .slot-name { color: var(--text); font-style: normal; }
+.slot-row.swap-over .slot-num,
+.slot-row.empty-row.swap-over .slot-num,
+.slot-row.init-row.swap-over .slot-num { color: var(--muted); }
+:root[data-theme="light"] .slot-row.swap-over,
+:root[data-theme="light"] .slot-row.swap-over:hover,
+:root[data-theme="light"] .slot-row.empty-row.swap-over,
+:root[data-theme="light"] .slot-row.init-row.swap-over,
+:root[data-theme="light"] .slot-row.selected.empty-row.swap-over,
+:root[data-theme="light"] .slot-row.selected.init-row.swap-over,
+:root[data-theme="light"] body.mf-dragging .slot-row.swap-over:hover {
+  background: var(--sel-bg);
+  border-color: var(--sel);
+}
+:root[data-theme="light"] .slot-row.swap-over .slot-name,
+:root[data-theme="light"] .slot-row.empty-row.swap-over .slot-name,
+:root[data-theme="light"] .slot-row.init-row.swap-over .slot-name { color: var(--text); }
+/* stesso trattamento per wavetable e campioni: durante il drag l'hover toglieva
+   lo sfondo del bersaglio (restava solo il contorno) */
+body.mf-dragging .wt-row.swap-over,
+body.mf-dragging .wt-row.swap-over:hover,
+body.mf-dragging .sm-row.swap-over,
+body.mf-dragging .sm-row.swap-over:hover {
+  background: var(--bg2);
+  outline: 2px solid var(--sel);
+  outline-offset: -2px;
+}
+
+/* ---------------------------------------------------------------- annullamento (undo)
+   Finestra di conferma: etichetta "Operation", dettaglio dell'operazione, frase fissa. */
+.undo-op-label {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted-strong);
+}
+.undo-op-line { margin: 0 0 3px; font-size: 14px; font-weight: 600; }
+.undo-op-note { margin: 14px 0 0; font-size: 14px; }
+#btn-undo { white-space: nowrap; }
+#btn-undo:disabled { opacity: .5; }
+
+/* ---------------------------------------------------------------- ascolto (audition)
+   Modulo delle impostazioni: riga con etichetta a sinistra e campo a destra. */
+.audition-form { display: grid; gap: 12px; margin: 12px 0 6px; }
+.audition-form label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.audition-form input[type="number"],
+.audition-form select { width: 110px; margin: 0; }
+.audition-form label.chk { justify-content: flex-start; gap: 8px; }
+.audition-form label.chk input { width: auto; margin: 0; }
+/* riga degli slot Init suggeriti: pulsanti cliccabili che riempiono il campo */
+.audition-suggest {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted-strong);
+}
+.audition-suggest .btn { min-width: 48px; }
+/* oltre dieci slot suggeriti l'elenco completo sta in una tendina, per non
+   riempire la finestra: la freccia la apre e la richiude */
+.audition-more-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg3);
+  max-height: 132px;
+  overflow-y: auto;
+}
+/* la finestra dell'ascolto ha piu contenuto delle altre: piu larga */
+.modal:has(.audition-form) { width: 620px; }
+/* ultima voce della finestra: ripristino dello slot di ascolto */
+.audition-restore {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+.audition-restore .btn:disabled { opacity: .5; cursor: default; }
+.audition-restore .muted { font-size: 13px; line-height: 1.45; }
+/* il comando dell'ascolto sta sulla riga di "Sort", spinto a destra:
+   stessa altezza del menu di ordinamento, non sulla riga del titolo */
+.sort-row #btn-audition {
+  margin-left: auto;
+  white-space: nowrap;
 }

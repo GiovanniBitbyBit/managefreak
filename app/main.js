@@ -1,4 +1,4 @@
-﻿// ManageFreak â€” Electron main process
+// ManageFreak â€” Electron main process
 'use strict';
 
 const { app, BrowserWindow, ipcMain, dialog, shell, session } = require('electron');
@@ -44,6 +44,19 @@ function createWindow() {
 
   mainWindow.removeMenu();
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  // Nessuna navigazione dentro la finestra dell'app: un clic su un link (changelog,
+  // release, pagina di sostegno) deve aprire il browser di sistema, altrimenti la
+  // finestra diventava la pagina web e l'app spariva dalla vista.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => { /* niente browser */ });
+    return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', (e, url) => {
+    if (url.startsWith('file://')) return; // navigazione interna legittima
+    e.preventDefault();
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => { /* niente browser */ });
+  });
 
   // se il processo di rendering crasha (es. driver MIDI instabile),
   // registra l'evento e ricarica automaticamente la finestra

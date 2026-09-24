@@ -32,6 +32,14 @@ files (imports `.mfp`, `.mbp`, `.mfpz`, `.mfprojz`, `.syx`; exports `.mfp`, `.mf
 - Samples and wavetables **preview**;
 - Many **backup** functionalities.
 
+## Added in 1.2.0
+
+- **Listen to presets from your library (audition)**: the ▶ button plays it on the MicroFreak: the preset is written to a scratch slot you choose in the dedicated Audition options, that slot is selected, and a note is played. Scratch slot (*Init* slots suggested), note (C3–C6) and note length are configurable; the slot is copied before the first listen and can be restored.
+- **Undo** (`↩ Undo`, `Ctrl+Z`): you can undo the last 5 operations such as presets written to slots, slots reset to *Init*, batch volume changes, wavetables, samples, and also everything done to the PC library (deletions, reordering, edits, imports). Confirmation lists exactly what will be touched.
+- **Drag several presets at once, in both directions**: library → synth and synth → library (all the selected slots are imported, with progress bar, Cancel, and insertion where you dropped them).
+- **Send the whole library to the MicroFreak**: you can now send an entire library to the MicroFreak and choose the starting slot. The menu lists every slot that will be written, together with the preset currently there that will be replaced.
+- **Support the project**: the top-left menu has a new button to donate.
+
 ## Features
 
 ### Main device-wide features
@@ -44,7 +52,13 @@ files (imports `.mfp`, `.mbp`, `.mfpz`, `.mfprojz`, `.syx`; exports `.mfp`, `.mf
   export, delete) from the detail pane;
 - **Batch volume edit**: set the Volume (**−12…+12 dB**, as shown on the MicroFreak) of all
   selected presets at once, on the device or in the PC library;
-- **Audition/select** a preset on the synth from the computer (Bank Select + Program Change);
+- **Audition/select** a preset on the synth from the computer: **listen to it** (it is written
+  to a scratch slot, selected and played) or just select it (Bank Select + Program Change);
+- **Undo** the last 5 operations (`↩ Undo`, `Ctrl+Z`): presets written to slots, slots reset to
+  *Init*, batch volume changes, wavetables, samples and PC-library edits;
+- **Drag several presets at once, in both directions** (library → synth and synth → library);
+- **Send the whole library** to the MicroFreak from a chosen starting slot, with the full list
+  of the slots that will be replaced;
 - **Initialize** slots back to the *Init* preset, with smart grey visualization to easily spot them;
 - **Download the whole bank** as a single `.mfprojz` file compatible with Arturia MCC;
 - **Import** single presets (`.mfp`, `.mbp`, `.mfpz`), MCC projects (`.mfprojz`, many presets

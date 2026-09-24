@@ -440,6 +440,18 @@ const Midi = (() => {
       output.send([0xc0 | (channel & 0x0f), program & 0x7f]);
     },
 
+    /** Nota premuta: serve all'ascolto dei preset della libreria (audition). */
+    sendNoteOn(channel, note, velocity = 100) {
+      if (!output) return;
+      output.send([0x90 | (channel & 0x0f), note & 0x7f, velocity & 0x7f]);
+    },
+
+    /** Rilascio della nota (velocity 0: alcuni device ignorano il Note On a 0). */
+    sendNoteOff(channel, note) {
+      if (!output) return;
+      output.send([0x80 | (channel & 0x0f), note & 0x7f, 0]);
+    },
+
     /** Test di connessione: identity request universale (F0 7E 7F 06 01 F7). */
     ping(timeoutMs = 1500) {
       if (!output || !input) return Promise.resolve(false);

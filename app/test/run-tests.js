@@ -64,8 +64,12 @@ function makeMidiStub() {
         assertSysexClean(op, payload);
         calls.push({ op, payload: payload ? Array.from(payload) : null, send: true });
       },
-      sendCC: () => {},
-      sendPC: () => {},
+      sendCC: (channel, cc, value) => {
+        calls.push({ cc: [channel, cc, value] });
+      },
+      sendPC: (channel, program) => {
+        calls.push({ pc: [channel, program] });
+      },
     },
   };
 }
@@ -86,6 +90,8 @@ global.window = {
 };
 const Library = require('../renderer/js/library.js');
 const Shift = require('../renderer/js/shift.js');
+const Undo = require('../renderer/js/undo.js');
+const Md = require('../renderer/js/markdown.js');
 
 // ---------------------------------------------------------------------------
 // helper per costruire messaggi sysex
@@ -1629,6 +1635,236 @@ async function test(name, fn) {
     const body2 = Params.setFieldValue(body, 'Gen.PrstVol', Params.volumeDbToRaw(6));
     const vol2 = Params.parseStructured(body2).fields.find((f) => f.key === 'Gen.PrstVol');
     assert.strictEqual(Params.friendlyValue(vol2).text, '+6 dB');
+  });
+
+  // ================================================================== ascolto (audition)
+  // L'ascolto di un preset della libreria passa dalla selezione dello slot di
+  // appoggio sul synth: se la mappatura slot -> banco/programma sbaglia, l'utente
+  // sente il preset sbagliato. Qui si verifica la mappatura e i byte inviati.
+  console.log('Ascolto (audition) — selezione slot:');
+
+  await test('bankOf/progOf: quattro banchi da 128 slot', () => {
+    const casi = [
+      [1, 0, 0], [127, 0, 126], [128, 0, 127],
+      [129, 1, 0], [256, 1, 127], [257, 2, 0],
+      [300, 2, 43], [384, 2, 127], [385, 3, 0], [512, 3, 127],
+    ];
+    for (const [slot, banco, prog] of casi) {
+      const id0 = slot - 1;
+      assert.strictEqual(MF.bankOf(id0), banco, `banco dello slot ${slot}`);
+      assert.strictEqual(MF.progOf(id0), prog, `programma dello slot ${slot}`);
+    }
+    // tutti gli slot finiscono in un banco valido e restano unici
+    const visti = new Set();
+    for (let slot = 1; slot <= 512; slot++) {
+      const coppia = `${MF.bankOf(slot - 1)}/${MF.progOf(slot - 1)}`;
+      assert.ok(!visti.has(coppia), `coppia banco/programma duplicata: ${coppia}`);
+      visti.add(coppia);
+    }
+    assert.strictEqual(visti.size, 512);
+  });
+
+  await test('selectPreset: Bank Select (CC0 + CC32) e Program Change su tutti i canali', () => {
+    const stub = makeMidiStub();
+    const prev = global.Midi;
+    global.Midi = stub.Midi;
+    try {
+      MF.selectPreset(300); // id0 = 299 -> banco 2, programma 43
+    } finally {
+      global.Midi = prev;
+    }
+    const ccs = stub.calls.filter((c) => c.cc);
+    const pcs = stub.calls.filter((c) => c.pc);
+    // 16 canali x 2 Control Change, 16 Program Change
+    assert.strictEqual(ccs.length, 32);
+    assert.strictEqual(pcs.length, 16);
+    // il Bank Select LSB (CC32) deve esserci: senza, i banchi oltre il primo non si raggiungono
+    assert.deepStrictEqual(ccs[0].cc, [0, 0, 2]);
+    assert.deepStrictEqual(ccs[1].cc, [0, 32, 0]);
+    assert.deepStrictEqual(pcs[0].pc, [0, 43]);
+    // ultimo canale (15): la selezione deve arrivare anche sul canale 16
+    assert.deepStrictEqual(ccs[30].cc, [15, 0, 2]);
+    assert.deepStrictEqual(ccs[31].cc, [15, 32, 0]);
+    assert.deepStrictEqual(pcs[15].pc, [15, 43]);
+    // tutti i valori devono restare entro i 7 bit del MIDI
+    for (const c of ccs) for (const b of c.cc) assert.ok(b >= 0 && b <= 127);
+    for (const c of pcs) for (const b of c.pc) assert.ok(b >= 0 && b <= 127);
+  });
+
+  await test('selectPreset: primo e ultimo slot finiscono nei banchi 0 e 3', () => {
+    const stub = makeMidiStub();
+    const prev = global.Midi;
+    global.Midi = stub.Midi;
+    try {
+      MF.selectPreset(1);
+      const primo = stub.calls.filter((c) => c.pc).map((c) => c.pc[1]);
+      stub.calls.length = 0;
+      MF.selectPreset(512);
+      const ultimo = stub.calls.filter((c) => c.pc).map((c) => c.pc[1]);
+      const bancoUltimo = stub.calls.filter((c) => c.cc && c.cc[1] === 0).map((c) => c.cc[2]);
+      assert.ok(primo.every((p) => p === 0), 'slot 1 -> programma 0');
+      assert.ok(ultimo.every((p) => p === 127), 'slot 512 -> programma 127');
+      assert.ok(bancoUltimo.every((b) => b === 3), 'slot 512 -> banco 3');
+    } finally {
+      global.Midi = prev;
+    }
+  });
+
+  // ================================================================== annullamento (undo)
+  console.log('Annullamento (undo):');
+
+  await test('undo: una transazione raggruppa più scritture in una sola voce', () => {
+    Undo.clear();
+    Undo.begin('3 presets → slots 100–102');
+    Undo.recordPreset(100, { name: 'A', category: 1, p1: 0, data: new Uint8Array(4672) });
+    Undo.recordPreset(101, { name: 'B', category: 2, p1: 1, data: new Uint8Array(4672) });
+    Undo.recordPreset(102, null); // slot che era vuoto
+    assert.strictEqual(Undo.commit(), true);
+    assert.strictEqual(Undo.canUndo(), true);
+    assert.strictEqual(Undo.depth(), 1);
+    assert.strictEqual(Undo.undoLabel(), '3 presets → slots 100–102');
+    const tx = Undo.peek();
+    assert.strictEqual(tx.presets.size, 3);
+    assert.strictEqual(tx.presets.get(102), null);
+    assert.strictEqual(tx.presets.get(100).name, 'A');
+  });
+
+  await test('undo: il primo stato registrato di uno slot è quello che vale', () => {
+    Undo.clear();
+    Undo.begin('test');
+    Undo.recordPreset(5, { name: 'Originale', data: new Uint8Array(4) });
+    Undo.recordPreset(5, { name: 'Sovrascritto', data: new Uint8Array(4) });
+    Undo.commit();
+    assert.strictEqual(Undo.peek().presets.get(5).name, 'Originale');
+  });
+
+  await test('undo: niente voci per transazioni vuote o annullate', () => {
+    Undo.clear();
+    Undo.begin('operazione senza modifiche');
+    assert.strictEqual(Undo.commit(), false);
+    assert.strictEqual(Undo.canUndo(), false);
+    Undo.begin('annullata');
+    Undo.recordPreset(9, null);
+    Undo.abort();
+    assert.strictEqual(Undo.canUndo(), false);
+    // una transazione dimenticata aperta viene chiusa dalla successiva
+    Undo.begin('prima');
+    Undo.recordPreset(1, null);
+    Undo.begin('seconda');
+    Undo.recordPreset(2, null);
+    Undo.commit();
+    assert.strictEqual(Undo.depth(), 2);
+  });
+
+  await test('undo: la profondità massima è rispettata', () => {
+    Undo.clear();
+    for (let i = 0; i < Undo.MAX_ENTRIES + 4; i++) {
+      Undo.begin(`operazione ${i}`);
+      Undo.recordPreset(i + 1, null);
+      Undo.commit();
+    }
+    assert.strictEqual(Undo.depth(), Undo.MAX_ENTRIES);
+    assert.strictEqual(Undo.undoLabel(), `operazione ${Undo.MAX_ENTRIES + 3}`);
+    // take estrae la più recente
+    const preso = Undo.take();
+    assert.strictEqual(preso.label, `operazione ${Undo.MAX_ENTRIES + 3}`);
+    assert.strictEqual(Undo.depth(), Undo.MAX_ENTRIES - 1);
+  });
+
+  await test('undo: describe riassume slot, wavetable, campioni e libreria', () => {
+    Undo.clear();
+    Undo.begin('operazione mista');
+    Undo.recordPreset(7, { name: 'X', data: new Uint8Array(2) });
+    Undo.recordPreset(8, null);
+    Undo.recordWavetable(3, { name: 'W', data: new Uint8Array(16) });
+    Undo.recordSample(4, null);
+    Undo.recordLibrary({ order: [1, 2, 3], removed: [{ entry: { id: 2, name: 'Cancellato' }, index: 1 }] });
+    Undo.commit();
+    const testo = Undo.describe(Undo.peek()).join(' | ');
+    assert.ok(/2 slots \(7, 8\)/.test(testo), 'slots elencati: ' + testo);
+    assert.ok(/1 wavetable \(3\)/.test(testo), 'wavetable: ' + testo);
+    assert.ok(/1 sample \(4\)/.test(testo), 'campione: ' + testo);
+    assert.ok(/1 preset removed from the library/.test(testo), 'libreria: ' + testo);
+    assert.ok(/library order/.test(testo), 'ordine: ' + testo);
+    const avvisi = Undo.notes(Undo.peek()).join(' | ');
+    assert.ok(/1 slot was empty/.test(avvisi), 'slot vuoto segnalato: ' + avvisi);
+  });
+
+  await test('undo: i testi della conferma sono in inglese', () => {
+    Undo.clear();
+    Undo.begin('mixed');
+    Undo.recordPreset(1, null);
+    Undo.recordPreset(2, { name: 'A', data: new Uint8Array(2) });
+    Undo.recordWavetable(5, null);
+    Undo.recordSample(6, null);
+    Undo.recordLibrary({ order: [1, 2], removed: [{ entry: { id: 1, name: 'X' }, index: 0 }], fields: new Map([[3, { rating: 0 }]]) });
+    Undo.commit();
+    const testo = [...Undo.describe(Undo.peek()), ...Undo.notes(Undo.peek())].join(' ').toLowerCase();
+    // parole italiane che erano rimaste nelle etichette: non devono ricomparire
+    for (const parola of ['ordine', 'libreria', 'modificat', 'rimoss', 'vuot', 'erano', 'slot erano', 'tornano']) {
+      assert.ok(!testo.includes(parola), `testo non inglese ("${parola}") in: ${testo}`);
+    }
+    assert.ok(/slot/.test(testo) && /preset/.test(testo));
+  });
+
+  await test('undo: i byte di un campione pesano nel limite di memoria', () => {
+    Undo.clear();
+    Undo.begin('campione grande');
+    Undo.recordSample(1, { name: 'Ney', data: new Uint8Array(384000) });
+    assert.ok(Undo.peek() === null); // non ancora committata
+    Undo.commit();
+    assert.ok(Undo.peek().bytes >= 384000, 'byte contati: ' + Undo.peek().bytes);
+    assert.ok(Undo.peek().bytes < Undo.MAX_BYTES);
+  });
+
+  // ================================================================== changelog (markdown)
+  console.log('Changelog (markdown):');
+
+  await test('markdown: titoli, liste e grassetto', () => {
+    const html = Md.render('## What is new\n\n- **Import** faster\n- fixed the zoom\n\nText after.');
+    assert.ok(html.includes('<h2>What is new</h2>'), html);
+    assert.ok(html.includes('<ul><li><strong>Import</strong> faster</li><li>fixed the zoom</li></ul>'), html);
+    assert.ok(html.includes('<p>Text after.</p>'), html);
+    // oltre h3 non si scende: in un menu sarebbe illeggibile
+    assert.ok(Md.render('##### deep').includes('<h3>deep</h3>'));
+    assert.ok(Md.render('---').includes('<hr>'));
+  });
+
+  await test('markdown: codice e link', () => {
+    const html = Md.render('Use `Ctrl+Z` and see [the releases](https://github.com/GiovanniBitbyBit/managefreak/releases).');
+    assert.ok(html.includes('<code>Ctrl+Z</code>'), html);
+    assert.ok(html.includes('<a href="https://github.com/GiovanniBitbyBit/managefreak/releases"'), html);
+    assert.ok(html.includes('>the releases</a>'), html);
+    // solo http/https: niente javascript: nei link
+    assert.ok(!Md.render('[x](javascript:alert(1))').includes('<a '), 'link non http non deve diventare un link');
+  });
+
+  await test('markdown: l HTML che arriva dalla rete viene neutralizzato', () => {
+    const html = Md.render('<script>alert(1)</script>\n\n<img src=x onerror="alert(2)">');
+    assert.ok(!html.includes('<script'), html);
+    assert.ok(!html.includes('<img'), html);
+    assert.ok(html.includes('&lt;script&gt;'), html);
+    assert.ok(html.includes('&lt;img'), html);
+    // anche dentro il grassetto e i link
+    assert.ok(!Md.render('**<b>x</b>**').includes('<b>'), 'markup dentro il grassetto');
+    assert.ok(!Md.render('[<i>y</i>](https://github.com/a)').includes('<i>'), 'markup dentro il link');
+  });
+
+  await test('undo: le voci aggiunte alla libreria si tolgono annullando', () => {
+    Undo.clear();
+    Undo.begin('add 2 presets to the library');
+    Undo.recordLibrary({ added: [10, 11] });
+    Undo.commit();
+    assert.deepStrictEqual(Undo.peek().library.added, [10, 11]);
+    const testo = Undo.describe(Undo.peek()).join(' | ');
+    assert.ok(/2 presets added to the library/.test(testo), testo);
+    // registrare due volte la stessa voce non la duplica
+    Undo.clear();
+    Undo.begin('x');
+    Undo.recordLibrary({ added: [5] });
+    Undo.recordLibrary({ added: [5] });
+    Undo.commit();
+    assert.deepStrictEqual(Undo.peek().library.added, [5]);
   });
 
   // ================================================================== FINE

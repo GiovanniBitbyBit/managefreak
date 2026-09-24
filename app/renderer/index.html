@@ -19,22 +19,26 @@
         <span class="brand-sub">Arturia MicroFreak preset manager</span>
       </div>
       <div id="app-menu" class="app-menu hidden">
-        <div class="app-menu-title">
-          <span class="logo">⬢</span>
-          <span>ManageFreak</span>
-          <span id="app-menu-version" class="app-menu-version"></span>
+        <div class="app-menu-scroll">
+          <div class="app-menu-title">
+            <span class="logo">⬢</span>
+            <span>ManageFreak</span>
+            <span id="app-menu-version" class="app-menu-version"></span>
+          </div>
+          <div class="app-menu-label">Changelog — latest release</div>
+          <div id="app-menu-changelog" class="app-menu-changelog">Loading…</div>
+          <div class="app-menu-zoom">
+            <span class="app-menu-label app-menu-zoom-label">Zoom</span>
+            <button id="btn-zoom-out" class="btn small" title="Zoom out (Ctrl -)">−</button>
+            <button id="btn-zoom-reset" class="btn small" title="Reset to 100% (Ctrl 0)"><span id="zoom-label">100%</span></button>
+            <button id="btn-zoom-in" class="btn small" title="Zoom in (Ctrl +)">+</button>
+          </div>
+          <div class="app-menu-actions">
+            <button id="btn-check-updates" class="btn primary">Check for updates</button>
+            <button id="btn-kofi" class="btn kofi" title="Support ManageFreak on Ko-fi — opens in your browser">☕ Support the project</button>
+          </div>
         </div>
-        <div class="app-menu-label">Changelog — latest release</div>
-        <div id="app-menu-changelog" class="app-menu-changelog">Loading…</div>
-        <div class="app-menu-zoom">
-          <span class="app-menu-label app-menu-zoom-label">Zoom</span>
-          <button id="btn-zoom-out" class="btn small" title="Zoom out (Ctrl -)">−</button>
-          <button id="btn-zoom-reset" class="btn small" title="Reset to 100% (Ctrl 0)"><span id="zoom-label">100%</span></button>
-          <button id="btn-zoom-in" class="btn small" title="Zoom in (Ctrl +)">+</button>
-        </div>
-        <div class="app-menu-actions">
-          <button id="btn-check-updates" class="btn primary">Check for updates</button>
-        </div>
+        <div id="app-menu-resize" class="app-menu-resize" title="Drag to resize this menu"></div>
       </div>
     </div>
     <div class="device-controls">
@@ -42,6 +46,7 @@
       <select id="midi-output" title="MIDI output port"></select>
       <button id="btn-connect" class="btn primary">Connect</button>
       <button id="btn-refresh-ports" class="btn" title="Refresh port list">⟳</button>
+      <button id="btn-undo" class="btn" disabled title="Nothing to undo yet.">↩ Undo</button>
       <span id="connection-status" class="status-dot offline" title="Connection status"></span>
     </div>
   </header>
@@ -117,6 +122,7 @@
               <option value="rating">Rating</option>
               <option value="category">Category</option>
             </select>
+            <button id="btn-audition" class="btn small" title="Listen to a preset on the MicroFreak">🎧 Audition: set up</button>
           </div>
         </div>
         <div id="lib-grid" class="lib-grid"></div>
@@ -305,6 +311,8 @@
   <script src="js/params.js"></script>
   <script src="js/shift.js"></script>
   <script src="js/library.js"></script>
+  <script src="js/markdown.js"></script>
+  <script src="js/undo.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
