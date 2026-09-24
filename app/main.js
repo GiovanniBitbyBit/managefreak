@@ -1,7 +1,7 @@
 // ManageFreak â€” Electron main process
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, shell, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, session, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
@@ -362,6 +362,14 @@ let updaterEngine = null;
 let updateDownloaded = false;
 let autoCheckPending = false; // true durante il check automatico all'avvio
 let updatePhase = 'idle'; // idle | check | download | install (per gli errori)
+// Il controllo automatico all'avvio può fallire perché il computer è appena stato
+// acceso e la rete non è ancora pronta (DNS non risolto → net::ERR_NAME_NOT_RESOLVED).
+// In quel caso l'app ritenta da sola, invece di lasciare l'utente senza aggiornamento
+// fino alla prossima riapertura.
+let autoCheckAttempt = 0;
+let autoRetryTimer = null;
+const AUTO_RETRY_DELAYS = [30 * 1000, 2 * 60 * 1000]; // due ritentativi
+const NET_ERROR = /ERR_NAME_NOT_RESOLVED|ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|ERR_PROXY_CONNECTION_FAILED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|ECONNRESET/i;
 
 function sendUpdateEvent(payload) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -414,6 +422,7 @@ function initAutoUpdater() {
 
   au.on('checking-for-update', () => sendUpdateEvent({ type: 'checking' }));
   au.on('update-available', (info) => {
+    autoCheckPending = false; // esito definitivo: il controllo è concluso
     sendUpdateEvent({
       type: 'available',
       version: info && info.version,
@@ -422,6 +431,7 @@ function initAutoUpdater() {
     });
   });
   au.on('update-not-available', (info) => {
+    autoCheckPending = false;
     sendUpdateEvent({ type: 'not-available', version: info && info.version });
   });
   au.on('download-progress', (p) => {
@@ -439,17 +449,26 @@ function initAutoUpdater() {
   });
   au.on('error', (err) => {
     logCrash('updater error: ' + (err && err.stack || err));
-    // gli errori del check automatico all'avvio restano silenziosi; se perÃ²
-    // l'utente ha avviato lui download/installazione, l'errore deve arrivare
+    // Gli errori del check automatico all'avvio non vanno mostrati: prima bastava
+    // che la promise del check si chiudesse prima dell'evento (una corsa con il
+    // finally) perché l'utente vedesse "Update error: net::ERR_NAME_NOT_RESOLVED"
+    // solo perché aveva acceso il PC da pochi secondi.
     const phase = updatePhase;
     const userInitiated = phase === 'download' || phase === 'install';
+    const message = String((err && err.message) || err);
+    const rete = NET_ERROR.test(message);
+    const eraAutomatico = autoCheckPending && !userInitiated;
+    autoCheckPending = false;
     sendUpdateEvent({
       type: 'error',
-      message: String((err && err.message) || err),
+      message,
       phase,
-      silent: autoCheckPending && !userInitiated,
+      // gli errori di rete del controllo automatico restano sempre silenziosi;
+      // quelli di download/installazione avviati dall'utente si mostrano
+      silent: eraAutomatico || (rete && !userInitiated),
     });
     updatePhase = 'idle';
+    if (eraAutomatico && rete) scheduleAutoRetry(au);
   });
 
   ipcMain.handle('update:action', async (_e, action) => {
@@ -496,13 +515,40 @@ function initAutoUpdater() {
   });
 
   // controllo automatico all'avvio (con un piccolo ritardo per non rallentare lo startup)
+  scheduleAutoCheck(au);
+}
+
+/** Primo controllo automatico: salta e ritenta se la rete non è ancora pronta. */
+function scheduleAutoCheck(engine) {
   setTimeout(() => {
-    if (updaterEngine !== au) return;
+    if (updaterEngine !== engine || updateDownloaded) return;
+    let online = true;
+    try { online = net.isOnline(); } catch { /* dubbio: si prova comunque */ }
+    autoCheckAttempt = 1;
+    if (!online) {
+      logCrash('updater: no network at startup, will retry');
+      scheduleAutoRetry(engine);
+      return;
+    }
     autoCheckPending = true;
-    au.checkForUpdates()
-      .catch(() => { /* gli errori arrivano giÃ  come evento */ })
-      .finally(() => { autoCheckPending = false; });
+    engine.checkForUpdates().catch(() => { /* l'esito arriva come evento */ });
   }, 5000);
+}
+
+/** Ritenta il controllo automatico dopo un fallimento di rete (max due volte). */
+function scheduleAutoRetry(engine) {
+  const idx = autoCheckAttempt - 1;
+  if (idx < 0 || idx >= AUTO_RETRY_DELAYS.length) return;
+  const delay = AUTO_RETRY_DELAYS[idx];
+  autoCheckAttempt++;
+  if (autoRetryTimer) clearTimeout(autoRetryTimer);
+  autoRetryTimer = setTimeout(() => {
+    autoRetryTimer = null;
+    if (updaterEngine !== engine || updateDownloaded) return;
+    logCrash('updater: retrying the automatic check');
+    autoCheckPending = true;
+    engine.checkForUpdates().catch(() => { /* l'esito arriva come evento */ });
+  }, delay);
 }
 
 // ---------------------------------------------------------------------------
