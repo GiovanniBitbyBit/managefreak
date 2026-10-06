@@ -153,6 +153,9 @@ Pick either workaround:
 
   ```bash
   xattr -dr com.apple.quarantine /Applications/ManageFreak.app
+  find /Applications/ManageFreak.app -name "._*" -delete
+  find /Applications/ManageFreak.app -name ".DS_Store" -delete
+  sudo codesign --force --deep --sign - /Applications/ManageFreak.app
   ```
 
 In-app updates are not available on the macOS and Linux builds (see [Known limitations](#known-limitations)).
