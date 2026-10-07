@@ -1,7 +1,7 @@
 {
   "name": "managefreak",
   "productName": "ManageFreak",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Open-source preset manager for the Arturia MicroFreak (Windows/macOS/Linux)",
   "main": "main.js",
   "author": {
@@ -50,6 +50,7 @@
       "node_modules/@julusian/midi/**"
     ],
     "npmRebuild": false,
+    "afterPack": "build/after-pack.js",
     "win": {
       "target": [
         "nsis",

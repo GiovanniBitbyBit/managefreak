@@ -140,11 +140,12 @@ whole source is public if you want to check it yourself.
 ### macOS: first launch
 
 Unfortunately I can't afford an Apple Developer Program membership (Developer ID certificate)
-just yet for a free and open source project, so I can't sign the app. Because of that macOS
-tends to treat it as malware even though it is not.
+just yet for a free and open source project, so I can't sign the app with a real certificate.
+Because of that macOS tends to treat it as malware even though it is not.
 
-The first time you open it, macOS blocks it with a message like *"ManageFreak is damaged"* or
-*"unidentified developer"*. The application itself is fine.
+From **1.2.3** the app is **signed ad-hoc** while it is built: a signature macOS accepts without
+needing any certificate. The first time you open it, macOS blocks it with *"ManageFreak is not
+from an identified developer"*. The application itself is fine.
 
 Pick either workaround:
 
@@ -153,10 +154,20 @@ Pick either workaround:
 
   ```bash
   xattr -dr com.apple.quarantine /Applications/ManageFreak.app
+  ```
+
+**If you are on 1.2.2 or earlier**, those builds were shipped **completely unsigned**, and macOS
+may refuse them with the harder message *"ManageFreak is damaged and should be moved to the
+Trash"*, which the workarounds above cannot fix. In that case run this once — thanks to DoronV
+for reporting it and providing these commands:
+
+  ```bash
   find /Applications/ManageFreak.app -name "._*" -delete
   find /Applications/ManageFreak.app -name ".DS_Store" -delete
   sudo codesign --force --deep --sign - /Applications/ManageFreak.app
   ```
+
+Better still: download the latest version, which already comes signed.
 
 In-app updates are not available on the macOS and Linux builds (see [Known limitations](#known-limitations)).
 
